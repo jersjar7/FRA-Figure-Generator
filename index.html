@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FRA Figure Generator</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="css/styles.css" />
+  <script type="importmap">
+  { "imports": { "proj4": "./vendor/proj4.esm.js", "shpjs": "./vendor/shp.esm.js" } }
+  </script>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>FRA Figure Generator</h1>
+      <p class="sub">Generate Flood Risk Assessment maps, observation-line charts, and WSE tables from SRH-2D/SMS exports. Everything runs locally in your browser.</p>
+    </div>
+    <div class="header-actions">
+      <button id="saveProject" type="button" class="ghost">Save project</button>
+      <button id="loadProject" type="button" class="ghost">Load project</button>
+      <input id="projectFile" type="file" accept=".frafig,.json" hidden />
+    </div>
+  </header>
+
+  <div class="dashboard">
+    <main class="workarea">
+      <div id="messages"></div>
+      <div class="tabs">
+        <button class="tab active" data-view="map" type="button">Map</button>
+        <button class="tab" data-view="charts" type="button">Observation charts</button>
+        <button class="tab" data-view="table" type="button">Summary table</button>
+      </div>
+
+      <section id="mapPanel" class="panel active">
+        <div id="mapShell">
+          <div id="placeholder">
+            <span>Drop Existing and Proposed <code>.h5</code> files, then generate an FRA figure.</span>
+          </div>
+          <canvas id="mapCanvas" width="1650" height="1275" hidden></canvas>
+        </div>
+      </section>
+
+      <section id="chartsPanel" class="panel">
+        <div id="chartsEmpty" class="empty">Observation-line charts will appear here after you add observation lines and click <strong>Generate charts/table</strong>.</div>
+        <div id="charts"></div>
+      </section>
+
+      <section id="tablePanel" class="panel">
+        <div id="tableEmpty" class="empty">The WSE comparison table will appear here after chart/table generation.</div>
+        <div class="table-actions">
+          <button id="copyTable" type="button" class="ghost" disabled>Copy table</button>
+          <button id="downloadTable" type="button" class="ghost" disabled>Download CSV</button>
+        </div>
+        <div id="summaryTable"></div>
+      </section>
+    </main>
+
+    <aside class="controls">
+      <details class="group" open>
+        <summary><span class="num">1</span> Data</summary>
+        <div class="block">
+          <div class="block-hd">SMS mesh/result files <span class="type-chip">.h5</span></div>
+          <label class="dropzone" id="dropH5">
+            <input id="h5Files" class="visually-hidden" type="file" accept=".h5" multiple />
+            <span class="dz-main">Drop geometry + datasets files here</span>
+            <span class="dz-sub">Existing and Proposed, any order</span>
+          </label>
+          <div id="h5Status" class="status"></div>
+        </div>
+        <div class="block stack" id="runBlock" hidden>
+          <div class="block-hd">Run pairing</div>
+          <label>Existing run <select id="existingRun"></select></label>
+          <label>Proposed run <select id="proposedRun"></select></label>
+        </div>
+      </details>
+
+      <details class="group" open>
+        <summary><span class="num">2</span> Overlays & observation lines</summary>
+        <div class="block">
+          <div class="block-hd">Shapefile overlays <span class="type-chip">.zip</span></div>
+          <label class="dropzone small" id="dropOverlay">
+            <input id="overlayFiles" class="visually-hidden" type="file" accept=".zip" multiple />
+            <span class="dz-main">Drop shapefile .zip files here</span>
+          </label>
+          <ul id="overlayList" class="overlay-list"></ul>
+        </div>
+
+        <div class="block stack">
+          <div class="block-hd">Manual observation lines</div>
+          <button id="drawLine" type="button">Draw line on map</button>
+          <p class="hint">Click the map once for the start and once for the end.</p>
+        </div>
+
+        <div class="block stack">
+          <div class="block-hd">SMS Summary Table <span class="opt">optional labels</span></div>
+          <textarea id="summaryPaste" rows="4" placeholder="Reach&#9;Station&#9;Min&#10;Creek&#9;3000.0&#9;63.2"></textarea>
+          <button id="applyStations" type="button" class="ghost">Apply station labels</button>
+        </div>
+
+        <div class="block">
+          <div class="block-hd">Observation lines</div>
+          <ul id="lineList" class="line-list"></ul>
+          <p id="lineEmpty" class="hint">No observation lines yet. Mark an imported line layer as observation lines, or draw lines on the map.</p>
+        </div>
+      </details>
+
+      <details class="group" open>
+        <summary><span class="num">3</span> Generate</summary>
+        <div class="block stack">
+          <label>Map figure
+            <select id="figureType">
+              <option value="diff">WSE difference map</option>
+              <option value="proposed">Proposed inundation + ground map</option>
+            </select>
+          </label>
+          <div class="row2">
+            <label class="inline">Dry depth <input id="dryDepth" type="number" value="0.05" step="0.01" min="0" /></label>
+            <label class="inline">Contour <input id="contourInterval" type="number" value="0.5" step="0.1" min="0" /></label>
+          </div>
+          <label class="chk"><input id="showWetDry" type="checkbox" checked /> Newly wet/dry fill</label>
+          <label class="chk"><input id="showContours" type="checkbox" checked /> WSE contours</label>
+          <button id="generateMap" class="primary" type="button">Generate map</button>
+          <button id="downloadMap" class="ghost" type="button" disabled>Download map PNG</button>
+          <button id="generateCharts" class="primary alt" type="button">Generate charts/table</button>
+        </div>
+      </details>
+
+      <div id="customize">
+        <details class="group">
+          <summary><span class="num">4</span> Frame & view</summary>
+          <div class="block stack">
+            <label>Orientation
+              <select id="orientation">
+                <option value="landscape">Landscape (11 x 8.5)</option>
+                <option value="portrait">Portrait (8.5 x 11)</option>
+              </select>
+            </label>
+            <div class="ctrl-row">
+              <span class="ctrl-lbl">Rotate</span>
+              <button id="rotCCW" type="button">-90</button>
+              <button id="rotCW" type="button">+90</button>
+              <label class="inline">Angle <input id="rot" type="number" value="0" step="5" /></label>
+            </div>
+            <div class="view-row">
+              <div class="vg">
+                <span class="ctrl-lbl">Zoom</span>
+                <button id="zoomIn" type="button">+</button>
+                <button id="zoomOut" type="button">-</button>
+              </div>
+              <div class="vg pan-block">
+                <span class="ctrl-lbl">Pan</span>
+                <div class="dpad">
+                  <button id="panU" type="button">Up</button>
+                  <button id="panL" type="button">Left</button>
+                  <button id="panD" type="button">Down</button>
+                  <button id="panR" type="button">Right</button>
+                </div>
+              </div>
+            </div>
+            <button id="viewReset" type="button" class="ghost">Reset view</button>
+          </div>
+        </details>
+
+        <details class="group">
+          <summary><span class="num">5</span> Figure elements</summary>
+          <div class="block stack">
+            <label class="chk"><input id="showTitle" type="checkbox" checked /> Title</label>
+            <input id="titleText" type="text" value="{type} - {existing} vs {proposed}" />
+            <label class="chk"><input id="showLegend" type="checkbox" checked /> Legend</label>
+            <label class="chk"><input id="showNorth" type="checkbox" checked /> North arrow</label>
+            <label class="chk"><input id="showScale" type="checkbox" checked /> Scale bar</label>
+            <label class="chk"><input id="showOverlays" type="checkbox" checked /> Overlays</label>
+            <label class="chk"><input id="showAnnos" type="checkbox" checked /> Labels/arrows</label>
+          </div>
+        </details>
+
+        <details class="group" id="grpAnno">
+          <summary><span class="num">6</span> Labels & arrows</summary>
+          <div class="anno-actions">
+            <button id="addLabel" type="button">Text label</button>
+            <button id="addArrow" type="button">Arrow</button>
+          </div>
+          <div class="bulk">
+            <input id="bulkLabels" type="text" placeholder="ROW, Parcel, FEMA SFHA" />
+            <button id="addBulkLabels" type="button">Add labels</button>
+          </div>
+          <ul id="annoList" class="anno-list"></ul>
+          <p id="annoEmpty" class="hint">No labels or arrows yet.</p>
+        </details>
+      </div>
+    </aside>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
