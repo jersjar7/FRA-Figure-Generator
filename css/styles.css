@@ -17,6 +17,10 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   color: var(--ink);
   background: var(--bg);
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 header {
@@ -52,37 +56,28 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .dashboard {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 430px;
-  gap: 16px;
-  padding: 16px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(330px, 430px);
+  gap: 12px;
+  padding: 12px;
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .workarea, .controls {
   min-width: 0;
 }
-
-#messages {
+.workarea {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: 10px;
+  min-height: 0;
 }
-.msg {
-  border-radius: 7px;
-  padding: 9px 11px;
-  font-size: 0.9rem;
-  border: 1px solid var(--line);
-  background: #fff;
-}
-.msg.ok { border-color: #9ed6bd; background: #eefaf4; color: #0d5e43; }
-.msg.warn { border-color: #f1d08b; background: #fff8e6; color: #6b4a06; }
-.msg.err { border-color: #f0aaa4; background: #fff1f0; color: #8f1c13; }
 
 .tabs {
   display: flex;
   gap: 6px;
   margin-bottom: 10px;
+  flex: none;
 }
 .tab {
   background: #fff;
@@ -94,19 +89,37 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   border-color: var(--ink);
 }
 
-.panel { display: none; }
-.panel.active { display: block; }
+.panel {
+  display: none;
+  min-height: 0;
+}
+.panel.active {
+  display: block;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+#mapPanel.active {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 
 #mapShell {
   position: relative;
   background: #e6ebf2;
   border: 1px solid var(--line);
   border-radius: 8px;
-  min-height: 520px;
+  min-height: 0;
+  flex: 1 1 auto;
   overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 #placeholder {
-  min-height: 520px;
+  min-height: 420px;
+  width: 100%;
+  align-self: stretch;
   display: grid;
   place-items: center;
   color: #516177;
@@ -115,7 +128,9 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 #mapCanvas {
   display: block;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
+  max-height: 100%;
   height: auto;
   background: #e6ebf2;
 }
@@ -183,9 +198,7 @@ tr:last-child td { border-bottom: 0; }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  position: sticky;
-  top: 12px;
-  max-height: calc(100vh - 24px);
+  max-height: 100%;
   overflow: auto;
 }
 .group {
@@ -390,8 +403,63 @@ input[type="color"] {
 .anno-actions button, .bulk button { flex: 1; }
 .bulk input { flex: 1 1 180px; }
 
+#toastStack {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  border-radius: 8px;
+  padding: 10px 10px 10px 12px;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  border: 1px solid var(--line);
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(23, 32, 51, 0.18);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  animation: toast-in 0.18s ease;
+}
+.toast.ok { border-color: #9ed6bd; background: #eefaf4; color: #0d5e43; }
+.toast.warn { border-color: #f1d08b; background: #fff8e6; color: #6b4a06; }
+.toast.err { border-color: #f0aaa4; background: #fff1f0; color: #8f1c13; }
+.toast.out {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.toast-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  line-height: 1;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 @media (max-width: 980px) {
-  .dashboard { grid-template-columns: 1fr; }
-  .controls { position: static; max-height: none; }
+  body {
+    display: block;
+    overflow: auto;
+  }
+  .dashboard {
+    grid-template-columns: 1fr;
+    overflow: visible;
+  }
+  .workarea { min-height: calc(100vh - 180px); }
+  .controls { max-height: none; }
   header { align-items: flex-start; flex-direction: column; }
 }

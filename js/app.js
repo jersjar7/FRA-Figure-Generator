@@ -39,13 +39,26 @@ let valueCache = new Map();
 
 function msg(text, type = "ok") {
   const div = document.createElement("div");
-  div.className = `msg ${type}`;
-  div.innerHTML = text;
-  $("messages").appendChild(div);
-  setTimeout(() => div.remove(), type === "err" ? 10000 : 6500);
+  div.className = `toast ${type}`;
+  div.setAttribute("role", type === "err" ? "alert" : "status");
+  const body = document.createElement("span");
+  body.textContent = text;
+  const close = document.createElement("button");
+  close.className = "toast-close";
+  close.type = "button";
+  close.setAttribute("aria-label", "Close notification");
+  close.textContent = "x";
+  div.append(body, close);
+  const remove = () => {
+    div.classList.add("out");
+    setTimeout(() => div.remove(), 180);
+  };
+  close.addEventListener("click", remove);
+  $("toastStack").appendChild(div);
+  setTimeout(remove, type === "err" ? 10000 : 6500);
 }
 function setMessages(items) {
-  $("messages").innerHTML = "";
+  $("toastStack").innerHTML = "";
   items.forEach((m) => msg(m.text, m.type));
 }
 
