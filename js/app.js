@@ -69,10 +69,19 @@ function escapeAttr(s) {
   return escapeHtml(s).replace(/`/g, "&#96;");
 }
 
+function conditionToken(text) {
+  const s = String(text || "");
+  const hasExisting = /(^|[^a-z0-9])(existing|ex)(?=[^a-z0-9]|$)/i.test(s);
+  const hasProposed = /(^|[^a-z0-9])(proposed|pr)(?=[^a-z0-9]|$)/i.test(s);
+  if (hasExisting && !hasProposed) return "EX";
+  if (hasProposed && !hasExisting) return "PR";
+  return null;
+}
 function condKey(name, fileName = "") {
-  const s = `${name || ""} ${fileName || ""}`;
-  if (/\b(EX|Existing)\b|(^|[_\-\s])EX([_\-\s.]|$)/i.test(s)) return "EX";
-  if (/\b(PR|Proposed)\b|(^|[_\-\s])PR([_\-\s.]|$)/i.test(s)) return "PR";
+  const fromFileName = conditionToken(fileName);
+  if (fromFileName) return fromFileName;
+  const fromH5Name = conditionToken(name);
+  if (fromH5Name) return fromH5Name;
   return "DEFAULT";
 }
 const condLabel = (k) => k === "EX" ? "Existing" : k === "PR" ? "Proposed" : "Mesh";
@@ -244,7 +253,8 @@ async function ingestH5Files(files) {
 function refreshH5Status() {
   const badge = (on, text) => `<span class="badge ${on ? "on" : ""}">${on ? "ok " : ""}${text}</span>`;
   const rows = [];
-  for (const [key, c] of usableConditions()) {
+  for (const key of ["EX", "PR", "DEFAULT"].filter((k) => conditions.has(k))) {
+    const c = conditions.get(key);
     rows.push(`<div class="cond-row"><span class="cond-name">${condLabel(key)}</span>${badge(!!c.proj, c.proj ? `${c.proj.N.toLocaleString()} nodes` : "geometry")}${badge(!!c.datasets, c.datasets ? `${c.datasets.runs.length} runs` : "datasets")}</div>`);
   }
   $("h5Status").innerHTML = rows.length ? rows.join("") : `<div class="hint">No H5 files loaded yet.</div>`;
