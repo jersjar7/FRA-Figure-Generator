@@ -1,7 +1,7 @@
 // Draw uploaded shapefile overlays (centerline, stationing, boundaries, …) on
-// the figure. shpjs returns GeoJSON already reprojected to WGS84 lon/lat, so we
-// just go lon/lat → Web Mercator → view-local, the same path as the mesh. Drawn
-// inside the rotated/zoomed/panned context, so overlays track the map.
+// the figure. The ingestion path normalizes overlays to WGS84 lon/lat, so this
+// module just goes lon/lat → Web Mercator → view-local, the same path as the
+// mesh. Drawn inside the rotated/zoomed/panned context, so overlays track the map.
 
 const R = 6378137;
 function toMerc(lon, lat) {

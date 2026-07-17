@@ -1,5 +1,5 @@
 import * as h5wasm from "../vendor/h5wasm/hdf5_hl.js";
-import shp from "shpjs";
+import shp, { combine, parseDbf, parseShp } from "shpjs";
 import proj4 from "proj4";
 import { readGeometry, readDatasets, finalTimestep, finalVector, isGeometryFile, isDatasetsFile } from "./h5.js";
 import { toLonLat, lonLatToMerc } from "./geo.js";
@@ -289,7 +289,7 @@ function populateRunSelectors() {
 async function ingestOverlayFiles(files) {
   for (const file of files) {
     try {
-      const res = await shp(await file.arrayBuffer());
+      const res = await readOverlayZip(file);
       for (const fc of (Array.isArray(res) ? res : [res])) {
         overlays.push({
           id: ++overlaySeq,
@@ -306,12 +306,155 @@ async function ingestOverlayFiles(files) {
         });
       }
     } catch (err) {
-      msg(`Could not read ${file.name}: ${err.message}`, "err");
+      msg(`Could not read ${file.name}: ${err.message || "unsupported shapefile"}`, "err");
     }
   }
   renderOverlayList();
   renderLineList();
   if (scene) await renderMap();
+}
+
+async function readOverlayZip(file) {
+  const buffer = await file.arrayBuffer();
+  try {
+    const parsed = await shp(buffer);
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    if (list.every(geojsonLooksLonLat)) return parsed;
+  } catch {
+    // Fall through to the tolerant reader below so the user gets a useful error.
+  }
+  return readOverlayZipFallback(buffer);
+}
+
+async function readOverlayZipFallback(buffer) {
+  const entries = await unzipEntries(buffer);
+  const layers = new Map();
+  for (const [name, bytes] of entries) {
+    const m = /^(.+)\.(shp|dbf|prj|cpg)$/i.exec(name);
+    if (!m || /(^|\/)__MACOSX\//i.test(name)) continue;
+    const key = m[1].toLowerCase();
+    if (!layers.has(key)) layers.set(key, { base: m[1] });
+    layers.get(key)[m[2].toLowerCase()] = bytes;
+  }
+  const out = [];
+  for (const layer of layers.values()) {
+    if (!layer.shp) continue;
+    const geom = parseShp(layer.shp.buffer.slice(layer.shp.byteOffset, layer.shp.byteOffset + layer.shp.byteLength));
+    const props = layer.dbf ? parseDbf(layer.dbf.buffer.slice(layer.dbf.byteOffset, layer.dbf.byteOffset + layer.dbf.byteLength), layer.cpg ? decodeText(layer.cpg) : undefined) : [];
+    const fc = combine([geom, props]);
+    fc.fileName = layer.base.split(/[\\/]/).pop();
+    if (!geojsonLooksLonLat(fc)) {
+      if (!layer.prj) throw new Error(`${fc.fileName || "Layer"} uses projected coordinates but has no .prj file.`);
+      reprojectFeatureCollection(fc, decodeText(layer.prj));
+    }
+    out.push(fc);
+  }
+  if (!out.length) throw new Error("No .shp layer found in the zip.");
+  return out.length === 1 ? out[0] : out;
+}
+
+async function unzipEntries(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const eocd = findEndOfCentralDirectory(bytes);
+  if (eocd < 0) throw new Error("The zip file is missing its central directory.");
+  const count = view.getUint16(eocd + 10, true);
+  let ptr = view.getUint32(eocd + 16, true);
+  const entries = [];
+  for (let i = 0; i < count; i++) {
+    if (view.getUint32(ptr, true) !== 0x02014b50) throw new Error("The zip central directory is malformed.");
+    const method = view.getUint16(ptr + 10, true);
+    const compSize = view.getUint32(ptr + 20, true);
+    const nameLen = view.getUint16(ptr + 28, true);
+    const extraLen = view.getUint16(ptr + 30, true);
+    const commentLen = view.getUint16(ptr + 32, true);
+    const localOffset = view.getUint32(ptr + 42, true);
+    const name = decodeText(bytes.subarray(ptr + 46, ptr + 46 + nameLen)).replace(/\\/g, "/");
+    if (view.getUint32(localOffset, true) !== 0x04034b50) throw new Error(`Zip entry ${name} has a malformed local header.`);
+    const localNameLen = view.getUint16(localOffset + 26, true);
+    const localExtraLen = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+    const compressed = bytes.subarray(dataStart, dataStart + compSize);
+    const data = method === 0 ? compressed : method === 8 ? await inflateRaw(compressed) : null;
+    if (!data) throw new Error(`Zip entry ${name} uses unsupported compression method ${method}.`);
+    entries.push([name, data]);
+    ptr += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+function findEndOfCentralDirectory(bytes) {
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
+    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) return i;
+  }
+  return -1;
+}
+
+async function inflateRaw(bytes) {
+  if (!globalThis.DecompressionStream) throw new Error("This browser cannot decompress zipped shapefiles.");
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function decodeText(bytes) {
+  return new TextDecoder().decode(bytes);
+}
+
+function geojsonLooksLonLat(fc) {
+  let checked = 0, ok = true;
+  visitFeatureCoords(fc, ([x, y]) => {
+    if (checked++ >= 100) return;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 180 || Math.abs(y) > 90) ok = false;
+  });
+  return checked > 0 && ok;
+}
+
+function visitFeatureCoords(fc, cb) {
+  for (const f of fc?.features || []) visitCoords(f.geometry?.coordinates, cb);
+}
+
+function visitCoords(coords, cb) {
+  if (!Array.isArray(coords)) return;
+  if (typeof coords[0] === "number" && typeof coords[1] === "number") cb(coords);
+  else coords.forEach((c) => visitCoords(c, cb));
+}
+
+function reprojectFeatureCollection(fc, prjText) {
+  const tx = projectionToWgs84(prjText);
+  for (const f of fc.features || []) if (f.geometry) f.geometry.coordinates = mapCoords(f.geometry.coordinates, (pt) => tx.forward(pt));
+}
+
+function mapCoords(coords, cb) {
+  if (typeof coords?.[0] === "number" && typeof coords?.[1] === "number") return cb(coords);
+  return Array.isArray(coords) ? coords.map((c) => mapCoords(c, cb)) : coords;
+}
+
+function projectionToWgs84(prjText) {
+  try { return proj4(prjText, "WGS84"); } catch {}
+  const proj = lambertAffineWktToProj4(prjText);
+  if (proj) return proj4(proj, "WGS84");
+  throw new Error("The shapefile projection is not supported. Re-export it as WGS84 or the same SMS/model coordinate system.");
+}
+
+function lambertAffineWktToProj4(wkt) {
+  if (!/Lambert Conformal Conic/i.test(wkt)) return null;
+  const param = (name) => {
+    const m = new RegExp(`PARAMETER\\["${name}"\\s*,\\s*([-+0-9.Ee]+)`, "i").exec(wkt);
+    return m ? parseFloat(m[1]) : null;
+  };
+  const spheroid = /SPHEROID\["[^"]+"\s*,\s*([-+0-9.Ee]+)\s*,\s*([-+0-9.Ee]+)/i.exec(wkt);
+  const units = [...wkt.matchAll(/UNIT\["[^"]+"\s*,\s*([-+0-9.Ee]+)/gi)];
+  const unit = units.length ? parseFloat(units[units.length - 1][1]) : 1;
+  const lat1 = param("Standard_Parallel_1");
+  const lat2 = param("Standard_Parallel_2");
+  const lat0 = param("Latitude_Of_Origin");
+  const lon0 = param("Central_Meridian");
+  const x0 = param("False_Easting");
+  const y0 = param("False_Northing");
+  if (![lat1, lat2, lat0, lon0, x0, y0, unit].every(Number.isFinite) || !spheroid) return null;
+  const a = parseFloat(spheroid[1]);
+  const rf = parseFloat(spheroid[2]);
+  return `+proj=lcc +lat_1=${lat1} +lat_2=${lat2} +lat_0=${lat0} +lon_0=${lon0} +x_0=${x0 * unit} +y_0=${y0 * unit} +a=${a} +rf=${rf} +to_meter=${unit} +no_defs`;
 }
 
 function renderOverlayList() {
@@ -697,6 +840,9 @@ function mapElementOptions(key, extra = {}) {
   const defaults = defaultMapElementPositions()[key] || { anchor: "br", offX: 0, offY: 0 };
   return { ...defaults, ...(mapElementPos[key] || {}), ...extra };
 }
+function contourColor() {
+  return $("contourColor")?.value || "#d92727";
+}
 function localCoordsFor(proj, view) {
   const lx = new Float64Array(proj.N), ly = new Float64Array(proj.N);
   for (let i = 0; i < proj.N; i++) {
@@ -732,7 +878,7 @@ async function composeMap(ctx, fig, frameObj) {
     }
     if ($("showContours").checked && fig.prProj && fig.prWseWet) {
       const prLocal = localCoordsFor(fig.prProj, view);
-      drawContours(ctx, prLocal.lx, prLocal.ly, fig.prProj.tris, fig.prWseWet, parseFloat($("contourInterval").value), "#d92727", 1.5);
+      drawContours(ctx, prLocal.lx, prLocal.ly, fig.prProj.tris, fig.prWseWet, parseFloat($("contourInterval").value), contourColor(), 1.5);
     }
   } else {
     const nb = fig.groundBounds;
@@ -741,7 +887,7 @@ async function composeMap(ctx, fig, frameObj) {
     ctx.globalAlpha = 0.9;
     fillMesh(ctx, lx, ly, p.tris, fig.wseWet, makeColorFn("Water_Elev_ft", { min: fig.wseBounds.min, max: fig.wseBounds.max, interval: fig.wseBounds.step, ramp: "waterSurface" }));
     ctx.restore();
-    if ($("showContours").checked) drawContours(ctx, lx, ly, p.tris, fig.wseWet, parseFloat($("contourInterval").value), "#222", 1.2);
+    if ($("showContours").checked) drawContours(ctx, lx, ly, p.tris, fig.wseWet, parseFloat($("contourInterval").value), contourColor(), 1.2);
     strokeMesh(ctx, lx, ly, p.tris, { color: "rgba(30,30,30,0.18)", width: 0.35 });
   }
   if ($("showOverlays").checked) drawOverlays(ctx, overlays, view);
@@ -1660,7 +1806,7 @@ function projectState() {
     overlays, manualLines, lineOverrides, annotations, annoSeq, manualLineSeq, overlaySeq,
     controls: {
       orientation: $("orientation").value, figureType: $("figureType").value, dryDepth: $("dryDepth").value,
-      contourInterval: $("contourInterval").value, showWetDry: $("showWetDry").checked,
+      contourInterval: $("contourInterval").value, contourColor: $("contourColor").value, showWetDry: $("showWetDry").checked,
       showContours: $("showContours").checked, titleText: $("titleText").value,
       showTitle: $("showTitle").checked, showLegend: $("showLegend").checked, showNorth: $("showNorth").checked,
       showScale: $("showScale").checked, showOverlays: $("showOverlays").checked, showAnnos: $("showAnnos").checked,
@@ -1688,7 +1834,7 @@ async function loadProjectFile(file) {
     overlaySeq = data.overlaySeq || overlays.reduce((m, o) => Math.max(m, o.id || 0), 0);
     $("summaryPaste").value = data.summaryPaste || "";
     const c = data.controls || {};
-    for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "titleText", "xsStations", "xsStartStation", "xsWidth", "xsSpacing", "xsCulverts"]) if (id in c) $(id).value = c[id];
+    for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "contourColor", "titleText", "xsStations", "xsStartStation", "xsWidth", "xsSpacing", "xsCulverts"]) if (id in c) $(id).value = c[id];
     for (const id of ["showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "xsFlip", "xsReverseStationing"]) if (id in c) $(id).checked = !!c[id];
     mapElementPos = { ...defaultMapElementPositions(), ...(c.mapElementPos || {}) };
     rotDeg = c.rotDeg || 0; zoom = c.zoom || 1; panX = c.panX || 0; panY = c.panY || 0; $("rot").value = rotDeg;
@@ -1733,7 +1879,7 @@ $("resetMapElements").addEventListener("click", () => {
   if (scene) renderMap();
 });
 
-for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "titleText"]) {
+for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "contourColor", "showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "titleText"]) {
   $(id).addEventListener("input", () => scene && renderMap());
   $(id).addEventListener("change", () => scene && renderMap());
 }
