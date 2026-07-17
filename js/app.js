@@ -1,5 +1,5 @@
 import * as h5wasm from "../vendor/h5wasm/hdf5_hl.js";
-import shp from "shpjs";
+import shp, { combine, parseDbf, parseShp } from "shpjs";
 import proj4 from "proj4";
 import { readGeometry, readDatasets, finalTimestep, finalVector, isGeometryFile, isDatasetsFile } from "./h5.js";
 import { toLonLat, lonLatToMerc } from "./geo.js";
@@ -343,6 +343,70 @@ function ignorePrjEntriesInZip(buf) {
   return { bytes: out, changed };
 }
 
+function sliceArrayBuffer(bytes) {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+async function inflateZipData(method, data, name) {
+  if (method === 0) return data;
+  if (method !== 8) throw new Error(`${name}: unsupported zip compression method ${method}`);
+  if (typeof DecompressionStream !== "function") throw new Error(`${name}: this browser cannot decompress deflated zip entries`);
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function unzipEntries(buf) {
+  const src = new Uint8Array(buf);
+  const dec = new TextDecoder();
+  const entries = new Map();
+  for (let i = 0; i < src.length - 46; i++) {
+    if (zipU32(src, i) !== 0x02014b50) continue;
+    const method = zipU16(src, i + 10);
+    const compSize = zipU32(src, i + 20);
+    const nameLen = zipU16(src, i + 28);
+    const extraLen = zipU16(src, i + 30);
+    const commentLen = zipU16(src, i + 32);
+    const localOff = zipU32(src, i + 42);
+    const name = dec.decode(src.slice(i + 46, i + 46 + nameLen));
+    i += 45 + nameLen + extraLen + commentLen;
+    if (!name || name.endsWith("/")) continue;
+    if (zipU32(src, localOff) !== 0x04034b50) throw new Error(`${name}: invalid zip local header`);
+    const localNameLen = zipU16(src, localOff + 26);
+    const localExtraLen = zipU16(src, localOff + 28);
+    const dataStart = localOff + 30 + localNameLen + localExtraLen;
+    const comp = src.slice(dataStart, dataStart + compSize);
+    entries.set(name.toLowerCase(), { name, data: await inflateZipData(method, comp, name) });
+  }
+  return entries;
+}
+
+async function readRawShapefilesFromZip(buf) {
+  const entries = await unzipEntries(buf);
+  const bases = new Map();
+  for (const [name, entry] of entries) {
+    const m = name.match(/^(.*)\.(shp|dbf)$/i);
+    if (!m) continue;
+    if (!bases.has(m[1])) bases.set(m[1], {});
+    bases.get(m[1])[m[2].toLowerCase()] = entry;
+  }
+  const out = [];
+  for (const [, group] of bases) {
+    if (!group.shp) continue;
+    const geoms = parseShp(sliceArrayBuffer(group.shp.data));
+    let props = [];
+    if (group.dbf) {
+      try { props = parseDbf(sliceArrayBuffer(group.dbf.data)); }
+      catch { props = []; }
+    }
+    if (!Array.isArray(props) || props.length !== geoms.length) props = geoms.map(() => ({}));
+    const fc = combine([geoms, props]);
+    fc.fileName = (group.shp.name || "").replace(/\.shp$/i, "");
+    out.push(fc);
+  }
+  if (!out.length) throw new Error("No .shp geometry found in the zip.");
+  return out.length === 1 ? out[0] : out;
+}
+
 function reprojectRawOverlayWithMeshCrs(fc, wkt) {
   const xy = [], refs = [];
   const visit = (coords) => {
@@ -361,18 +425,52 @@ function reprojectRawOverlayWithMeshCrs(fc, wkt) {
   return fc;
 }
 
+function overlayCoordsNeedMeshCrs(res) {
+  let seen = 0;
+  let projected = false;
+  const visit = (coords) => {
+    if (projected || !Array.isArray(coords)) return;
+    if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+      seen++;
+      if (Number.isFinite(coords[0]) && Number.isFinite(coords[1]) && (Math.abs(coords[0]) > 180 || Math.abs(coords[1]) > 90)) projected = true;
+    } else {
+      for (const c of coords) visit(c);
+    }
+  };
+  for (const fc of (Array.isArray(res) ? res : [res])) {
+    for (const f of fc?.features || []) if (f.geometry) visit(f.geometry.coordinates);
+  }
+  return seen > 0 && projected;
+}
+
+function reprojectOverlayResultWithMeshCrs(res, wkt) {
+  const list = Array.isArray(res) ? res : [res];
+  for (const fc of list) reprojectRawOverlayWithMeshCrs(fc, wkt);
+  return Array.isArray(res) ? list : list[0];
+}
+
 async function readOverlayZip(file) {
   const buffer = await file.arrayBuffer();
+  const meshWkt = overlayMeshWkt();
   try {
-    return { res: await shp(buffer), usedMeshCrs: false };
+    const res = await shp(buffer);
+    if (meshWkt && overlayCoordsNeedMeshCrs(res)) {
+      const retry = ignorePrjEntriesInZip(buffer);
+      let rawRes = retry.changed ? null : res;
+      if (retry.changed) {
+        try { rawRes = await shp(retry.bytes); }
+        catch { rawRes = await readRawShapefilesFromZip(buffer); }
+      }
+      return { res: reprojectOverlayResultWithMeshCrs(rawRes, meshWkt), usedMeshCrs: true };
+    }
+    return { res, usedMeshCrs: false };
   } catch (primaryErr) {
-    const meshWkt = overlayMeshWkt();
     const retry = ignorePrjEntriesInZip(buffer);
     if (meshWkt && retry.changed) {
-      const res = await shp(retry.bytes);
-      const list = Array.isArray(res) ? res : [res];
-      for (const fc of list) reprojectRawOverlayWithMeshCrs(fc, meshWkt);
-      return { res: Array.isArray(res) ? list : list[0], usedMeshCrs: true, primaryErr };
+      let res;
+      try { res = await shp(retry.bytes); }
+      catch { res = await readRawShapefilesFromZip(buffer); }
+      return { res: reprojectOverlayResultWithMeshCrs(res, meshWkt), usedMeshCrs: true, primaryErr };
     }
     throw primaryErr;
   }
