@@ -35,6 +35,7 @@ const MAP_ELEMENT_CONFIG = [
   { key: "title", label: "Title", anchor: "tc" },
   { key: "diffLegend", label: "WSE diff legend", anchor: "br" },
   { key: "topoLegend", label: "Topography legend", anchor: "tl" },
+  { key: "wseLegend", label: "WSE legend", anchor: "ml" },
   { key: "north", label: "North arrow", anchor: "tr" },
   { key: "scale", label: "Scale bar", anchor: "bl" },
   { key: "wetDry", label: "Wet/dry key", anchor: "mr" },
@@ -485,7 +486,7 @@ function buildIndex(proj) {
   proj.index = { b, cell, grid };
   return proj.index;
 }
-function nearestNode(proj, mx, my) {
+function nearestNodeInfo(proj, mx, my) {
   const ix = buildIndex(proj);
   const cx = Math.floor((mx - ix.b.x0) / ix.cell);
   const cy = Math.floor((my - ix.b.y0) / ix.cell);
@@ -507,7 +508,26 @@ function nearestNode(proj, mx, my) {
     }
     if (best >= 0 && searched) break;
   }
-  return best;
+  return { index: best, distance2: bestD };
+}
+function nearestNode(proj, mx, my) {
+  return nearestNodeInfo(proj, mx, my).index;
+}
+function meshMatchTolerance2(proj) {
+  if (proj.matchTolerance2) return proj.matchTolerance2;
+  const lengths = [];
+  for (let t = 0; t < proj.tris.length; t += 3) {
+    const ids = [proj.tris[t], proj.tris[t + 1], proj.tris[t + 2]];
+    for (let e = 0; e < 3; e++) {
+      const a = ids[e], b = ids[(e + 1) % 3];
+      lengths.push(Math.hypot(proj.mx[a] - proj.mx[b], proj.my[a] - proj.my[b]));
+    }
+  }
+  lengths.sort((a, b) => a - b);
+  const medianEdge = lengths[Math.floor(lengths.length / 2)] || buildIndex(proj).cell;
+  const tol = Math.max(medianEdge * 2.25, buildIndex(proj).cell * 0.75);
+  proj.matchTolerance2 = tol * tol;
+  return proj.matchTolerance2;
 }
 function buildXYIndex(proj) {
   if (proj.xyIndex) return proj.xyIndex;
@@ -550,6 +570,13 @@ function nearestNodeXY(proj, x, y) {
   return best;
 }
 
+function maskedWetValues(values, depth, dry) {
+  const out = new Float32Array(values.length);
+  for (let i = 0; i < values.length; i++) {
+    out[i] = VALID(values[i]) && VALID(depth[i]) && depth[i] > dry ? values[i] : -999;
+  }
+  return out;
+}
 function buildComparisonData(exSel, prSel) {
   const exWseP = findParam(exSel.run, /Water_?Elev/i);
   const prWseP = findParam(prSel.run, /Water_?Elev/i);
@@ -563,7 +590,10 @@ function buildComparisonData(exSel, prSel) {
   const prDepth = scalarValues(prSel, prDepthP);
   const diff = new Float32Array(exSel.cond.proj.N);
   const wetDry = new Int8Array(exSel.cond.proj.N);
+  const prWetDry = new Int8Array(prSel.cond.proj.N);
   const dry = parseFloat($("dryDepth").value) || 0;
+  const prWseWet = maskedWetValues(prWse, prDepth, dry);
+  const exMatchTol2 = meshMatchTolerance2(exSel.cond.proj);
   for (let i = 0; i < exSel.cond.proj.N; i++) {
     const j = nearestNode(prSel.cond.proj, exSel.cond.proj.mx[i], exSel.cond.proj.my[i]);
     const ew = exWse[i], pw = j >= 0 ? prWse[j] : -999;
@@ -573,7 +603,14 @@ function buildComparisonData(exSel, prSel) {
     const prWet = j >= 0 && VALID(prDepth[j]) && prDepth[j] > dry;
     wetDry[i] = !exWet && prWet ? 1 : exWet && !prWet ? -1 : 0;
   }
-  return { exWse, prWse, exDepth, prDepth, diff, wetDry, exWseP, prWseP };
+  for (let j = 0; j < prSel.cond.proj.N; j++) {
+    const info = nearestNodeInfo(exSel.cond.proj, prSel.cond.proj.mx[j], prSel.cond.proj.my[j]);
+    const comparable = info.index >= 0 && info.distance2 <= exMatchTol2;
+    const exHasResult = comparable && VALID(exDepth[info.index]);
+    const prWet = VALID(prDepth[j]) && prDepth[j] > dry;
+    prWetDry[j] = !exHasResult && prWet ? 1 : 0;
+  }
+  return { exWse, prWse, exDepth, prDepth, diff, wetDry, prWetDry, prWseWet, exWseP, prWseP };
 }
 
 function diffColor(maxAbs) {
@@ -660,6 +697,14 @@ function mapElementOptions(key, extra = {}) {
   const defaults = defaultMapElementPositions()[key] || { anchor: "br", offX: 0, offY: 0 };
   return { ...defaults, ...(mapElementPos[key] || {}), ...extra };
 }
+function localCoordsFor(proj, view) {
+  const lx = new Float64Array(proj.N), ly = new Float64Array(proj.N);
+  for (let i = 0; i < proj.N; i++) {
+    const pt = view.toLocal(proj.mx[i], proj.my[i]);
+    lx[i] = pt[0]; ly[i] = pt[1];
+  }
+  return { lx, ly };
+}
 
 async function composeMap(ctx, fig, frameObj) {
   const view = makeView(commonBbox(), frameObj);
@@ -674,21 +719,29 @@ async function composeMap(ctx, fig, frameObj) {
   ctx.translate(view.originX, view.originY);
   ctx.rotate(view.rotRad);
   const p = fig.proj;
-  const lx = new Float64Array(p.N), ly = new Float64Array(p.N);
-  for (let i = 0; i < p.N; i++) {
-    const pt = view.toLocal(p.mx[i], p.my[i]);
-    lx[i] = pt[0]; ly[i] = pt[1];
-  }
+  const { lx, ly } = localCoordsFor(p, view);
 
   if (fig.type === "diff") {
     fillMesh(ctx, lx, ly, p.tris, fig.diff, diffColor(fig.maxAbs));
-    if ($("showWetDry").checked) fillWetDry(ctx, lx, ly, p.tris, fig.wetDry);
-    if ($("showContours").checked) drawContours(ctx, lx, ly, p.tris, fig.exWse, parseFloat($("contourInterval").value), "#d92727", 1.5);
+    if ($("showWetDry").checked) {
+      fillWetDry(ctx, lx, ly, p.tris, fig.wetDry);
+      if (fig.prProj && fig.prWetDry) {
+        const prLocal = localCoordsFor(fig.prProj, view);
+        fillWetDry(ctx, prLocal.lx, prLocal.ly, fig.prProj.tris, fig.prWetDry);
+      }
+    }
+    if ($("showContours").checked && fig.prProj && fig.prWseWet) {
+      const prLocal = localCoordsFor(fig.prProj, view);
+      drawContours(ctx, prLocal.lx, prLocal.ly, fig.prProj.tris, fig.prWseWet, parseFloat($("contourInterval").value), "#d92727", 1.5);
+    }
   } else {
     const nb = fig.groundBounds;
     fillMesh(ctx, lx, ly, p.tris, p.z, makeColorFn("Topography", { min: nb.min, max: nb.max, interval: nb.step, ramp: "topography" }));
-    fillWetDepth(ctx, lx, ly, p.tris, fig.depth);
-    if ($("showContours").checked) drawContours(ctx, lx, ly, p.tris, fig.wse, parseFloat($("contourInterval").value), "#085bb5", 1.25);
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    fillMesh(ctx, lx, ly, p.tris, fig.wseWet, makeColorFn("Water_Elev_ft", { min: fig.wseBounds.min, max: fig.wseBounds.max, interval: fig.wseBounds.step, ramp: "waterSurface" }));
+    ctx.restore();
+    if ($("showContours").checked) drawContours(ctx, lx, ly, p.tris, fig.wseWet, parseFloat($("contourInterval").value), "#222", 1.2);
     strokeMesh(ctx, lx, ly, p.tris, { color: "rgba(30,30,30,0.18)", width: 0.35 });
   }
   if ($("showOverlays").checked) drawOverlays(ctx, overlays, view);
@@ -703,7 +756,10 @@ async function composeMap(ctx, fig, frameObj) {
   if ($("showTitle").checked) drawTitle(ctx, mapTitle, mapElementOptions("title", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 26 }));
   if ($("showLegend").checked) {
     if (fig.type === "diff") drawLegend(ctx, diffLegend(fig.maxAbs), mapElementOptions("diffLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 19 }));
-    else drawLegend(ctx, legendBands("Topography", { min: fig.groundBounds.min, max: fig.groundBounds.max, interval: fig.groundBounds.step, ramp: "topography" }), mapElementOptions("topoLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 18 }));
+    else {
+      drawLegend(ctx, legendBands("Topography", { min: fig.groundBounds.min, max: fig.groundBounds.max, interval: fig.groundBounds.step, ramp: "topography" }), mapElementOptions("topoLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 18 }));
+      drawLegend(ctx, legendBands("Water_Elev_ft", { min: fig.wseBounds.min, max: fig.wseBounds.max, interval: fig.wseBounds.step, ramp: "waterSurface" }), mapElementOptions("wseLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 18 }));
+    }
   }
   if ($("showNorth").checked) drawNorthArrow(ctx, mapElementOptions("north", { frameW: frameObj.w, frameH: frameObj.h, radius: 46, rotRad: view.rotRad }));
   if ($("showScale").checked) drawScaleBar(ctx, mapElementOptions("scale", { frameW: frameObj.w, frameH: frameObj.h, ftPerPixel: ftPerPixel(view), sizeScale: 1.5, segments: 4 }));
@@ -788,7 +844,7 @@ function drawObservationLines(ctx, view, rotated) {
 function resolveTitle(fig) {
   const tpl = $("titleText").value || "{type} - {existing} vs {proposed}";
   const map = {
-    type: fig.type === "diff" ? "WSE Difference Map" : "Proposed Inundation and Ground Map",
+    type: fig.type === "diff" ? "WSE Difference Map" : "Proposed WSE, Inundation, and Ground Map",
     existing: runLabel(selectedRun("existingRun")?.run?.name || "Existing"),
     proposed: runLabel(selectedRun("proposedRun")?.run?.name || "Proposed"),
   };
@@ -805,19 +861,31 @@ async function generateMap() {
       const cmp = buildComparisonData(exSel, prSel);
       const st = stats(cmp.diff);
       const maxAbs = Math.max(0.25, niceBounds(0, st.maxAbs, 6).max);
-      scene = { type: "diff", proj: exSel.cond.proj, ...cmp, maxAbs };
+      scene = { type: "diff", proj: exSel.cond.proj, prProj: prSel.cond.proj, ...cmp, maxAbs };
     } else {
       const wseP = findParam(prSel.run, /Water_?Elev/i);
       const depthP = findParam(prSel.run, /Water_?Depth/i);
       if (!wseP || !depthP) throw new Error("Proposed run needs Water_Elev_ft and Water_Depth_ft.");
       const wse = scalarValues(prSel, wseP);
       const depth = scalarValues(prSel, depthP);
+      const dry = parseFloat($("dryDepth").value) || 0;
+      const wseWet = maskedWetValues(wse, depth, dry);
+      const wseStats = stats(wseWet);
+      if (!wseStats.valid) throw new Error("Proposed run has no wet Water_Elev_ft values at the selected dry-depth threshold.");
       const zStats = stats(prSel.cond.proj.z);
-      scene = { type: "proposed", proj: prSel.cond.proj, wse, depth, groundBounds: niceBounds(zStats.lo, zStats.hi, 8) };
+      scene = {
+        type: "proposed",
+        proj: prSel.cond.proj,
+        wse,
+        wseWet,
+        depth,
+        wseBounds: niceBounds(wseStats.lo, wseStats.hi, 8),
+        groundBounds: niceBounds(zStats.lo, zStats.hi, 8),
+      };
     }
     await renderMap();
     $("downloadMap").disabled = false;
-    msg(type === "diff" ? "WSE difference map generated." : "Proposed inundation map generated.", "ok");
+    msg(type === "diff" ? "WSE difference map generated." : "Proposed WSE/inundation map generated.", "ok");
   } catch (err) {
     msg(err.message, "err");
   }

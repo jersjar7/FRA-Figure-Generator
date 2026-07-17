@@ -6,7 +6,7 @@ The first version focuses on the SMS-derived figures that are difficult to expor
 
 - Existing vs proposed 100-year WSE difference maps
 - Newly inundated / newly dry areas
-- Proposed inundation plus ground elevation maps
+- Proposed WSE, inundation, and ground elevation maps
 - Proposed-condition cross-section figures from a centerline and station list
 - Observation-line WSE comparison charts
 - Existing/proposed WSE summary tables
