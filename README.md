@@ -7,6 +7,7 @@ The first version focuses on the SMS-derived figures that are difficult to expor
 - Existing vs proposed 100-year WSE difference maps
 - Newly inundated / newly dry areas
 - Proposed inundation plus ground elevation maps
+- Proposed-condition cross-section figures from a centerline and station list
 - Observation-line WSE comparison charts
 - Existing/proposed WSE summary tables
 
@@ -19,6 +20,7 @@ Everything runs in the browser. Mesh/result files are read locally and are not u
 - Proposed geometry `.h5`
 - Proposed datasets `.h5`
 - Optional zipped shapefiles for ROW, parcels, FEMA/SFHA, project limits, observation lines, etc.
+- Optional centerline shapefile for proposed-condition cross sections
 - Optional SMS Summary Table paste for station labels
 
 Required SMS datasets for the FRA workflow:

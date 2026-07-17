@@ -14,7 +14,7 @@
   <header>
     <div>
       <h1>FRA Figure Generator</h1>
-      <p class="sub">Generate Flood Risk Assessment maps, observation-line charts, and WSE tables from SRH-2D/SMS exports. Everything runs locally in your browser.</p>
+      <p class="sub">Generate Flood Risk Assessment maps, proposed-condition cross sections, observation-line charts, and WSE tables from SRH-2D/SMS exports. Everything runs locally in your browser.</p>
     </div>
     <div class="header-actions">
       <button id="saveProject" type="button" class="ghost">Save project</button>
@@ -28,6 +28,7 @@
       <div class="tabs">
         <button class="tab active" data-view="map" type="button">Map</button>
         <button class="tab" data-view="charts" type="button">Observation charts</button>
+        <button class="tab" data-view="crossSections" type="button">Cross sections</button>
         <button class="tab" data-view="table" type="button">Summary table</button>
       </div>
 
@@ -43,6 +44,11 @@
       <section id="chartsPanel" class="panel">
         <div id="chartsEmpty" class="empty">Observation-line charts will appear here after you add observation lines and click <strong>Generate charts/table</strong>.</div>
         <div id="charts"></div>
+      </section>
+
+      <section id="crossSectionsPanel" class="panel">
+        <div id="crossSectionsEmpty" class="empty">Proposed-condition cross sections will appear here after you add a centerline, enter stations, and click <strong>Generate cross sections</strong>.</div>
+        <div id="crossSections"></div>
       </section>
 
       <section id="tablePanel" class="panel">
@@ -125,9 +131,31 @@
         </div>
       </details>
 
+      <details class="group">
+        <summary><span class="num">4</span> Cross sections</summary>
+        <div class="block stack">
+          <label>Stations
+            <textarea id="xsStations" rows="4" placeholder="0+70&#10;1+73&#10;2+19&#10;2+53&#10;2+89&#10;3+43&#10;4+43"></textarea>
+          </label>
+          <div class="row2">
+            <label class="inline">Start station <input id="xsStartStation" type="number" value="0" step="1" /></label>
+            <label class="inline">Width <input id="xsWidth" type="number" value="60" step="1" min="5" /></label>
+          </div>
+          <div class="row2">
+            <label class="inline">Sample <input id="xsSpacing" type="number" value="1" step="0.5" min="0.5" /></label>
+            <label class="chk"><input id="xsFlip" type="checkbox" /> Flip left/right</label>
+          </div>
+          <label class="chk"><input id="xsReverseStationing" type="checkbox" /> Stationing increases opposite the centerline</label>
+          <label>Culvert boxes <span class="opt">optional</span>
+            <textarea id="xsCulverts" rows="3" placeholder="2+53, 18, 48, 16, 11&#10;2+89, 18, 48, 16, 11"></textarea>
+          </label>
+          <button id="generateCrossSections" class="primary alt" type="button">Generate cross sections</button>
+        </div>
+      </details>
+
       <div id="customize">
         <details class="group">
-          <summary><span class="num">4</span> Frame & view</summary>
+          <summary><span class="num">5</span> Frame & view</summary>
           <div class="block stack">
             <label>Orientation
               <select id="orientation">
@@ -162,7 +190,7 @@
         </details>
 
         <details class="group">
-          <summary><span class="num">5</span> Figure elements</summary>
+          <summary><span class="num">6</span> Figure elements</summary>
           <div class="block stack">
             <label class="chk"><input id="showTitle" type="checkbox" checked /> Title</label>
             <input id="titleText" type="text" value="{type} - {existing} vs {proposed}" />
@@ -175,7 +203,7 @@
         </details>
 
         <details class="group" id="grpAnno">
-          <summary><span class="num">6</span> Labels & arrows</summary>
+          <summary><span class="num">7</span> Labels & arrows</summary>
           <div class="anno-actions">
             <button id="addLabel" type="button">Text label</button>
             <button id="addArrow" type="button">Arrow</button>

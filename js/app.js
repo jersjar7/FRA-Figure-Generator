@@ -30,6 +30,7 @@ let overlaySeq = 0;
 let manualLineSeq = 0;
 let scene = null;
 let chartRows = [];
+let crossRows = [];
 let drawingLine = null;
 let placingAnno = null;
 let rotDeg = 0, zoom = 1, panX = 0, panY = 0;
@@ -483,6 +484,46 @@ function nearestNode(proj, mx, my) {
         for (const i of arr) {
           const x = proj.mx[i] - mx, y = proj.my[i] - my;
           const d = x * x + y * y;
+          if (d < bestD) { bestD = d; best = i; }
+        }
+      }
+    }
+    if (best >= 0 && searched) break;
+  }
+  return best;
+}
+function buildXYIndex(proj) {
+  if (proj.xyIndex) return proj.xyIndex;
+  const b = proj.xyBbox;
+  const cell = Math.max((b.x1 - b.x0), (b.y1 - b.y0)) / Math.max(20, Math.sqrt(proj.N) / 2);
+  const grid = new Map();
+  for (let i = 0; i < proj.N; i++) {
+    const x = proj.xy[i * 2], y = proj.xy[i * 2 + 1];
+    const cx = Math.floor((x - b.x0) / cell);
+    const cy = Math.floor((y - b.y0) / cell);
+    const k = `${cx},${cy}`;
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+  proj.xyIndex = { b, cell, grid };
+  return proj.xyIndex;
+}
+function nearestNodeXY(proj, x, y) {
+  const ix = buildXYIndex(proj);
+  const cx = Math.floor((x - ix.b.x0) / ix.cell);
+  const cy = Math.floor((y - ix.b.y0) / ix.cell);
+  let best = -1, bestD = Infinity;
+  for (let r = 0; r <= 5; r++) {
+    let searched = 0;
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const arr = ix.grid.get(`${cx + dx},${cy + dy}`);
+        if (!arr) continue;
+        searched += arr.length;
+        for (const i of arr) {
+          const px = proj.xy[i * 2] - x, py = proj.xy[i * 2 + 1] - y;
+          const d = px * px + py * py;
           if (d < bestD) { bestD = d; best = i; }
         }
       }
@@ -956,6 +997,332 @@ function drawChartLegend(ctx, W, y) {
   ctx.restore();
 }
 
+function parseStationValue(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  const sta = s.match(/^(-?\d+)\s*\+\s*(\d+(?:\.\d+)?)/);
+  if (sta) {
+    const whole = parseFloat(sta[1]);
+    const off = parseFloat(sta[2]);
+    return whole < 0 ? whole * 100 - off : whole * 100 + off;
+  }
+  const n = s.match(/-?\d+(?:\.\d+)?/);
+  return n ? parseFloat(n[0]) : null;
+}
+function stationListFromControls() {
+  const text = $("xsStations").value.trim();
+  let rows = [];
+  if (text) {
+    rows = text.split(/\r?\n/).map((line) => {
+      const station = parseStationValue(line);
+      return station == null ? null : { station, label: formatStation(station) };
+    }).filter(Boolean);
+  } else {
+    rows = parseSummary($("summaryPaste").value || "").rows
+      .map((r) => ({ station: r.station, label: formatStation(r.station) }));
+  }
+  const seen = new Set();
+  return rows.filter((r) => {
+    const key = r.station.toFixed(3);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => a.station - b.station);
+}
+function parseCrossSectionCulverts() {
+  return ($("xsCulverts").value || "").split(/\r?\n/).map((line) => {
+    const parts = line.split(/[,\t ]+/).map((p) => p.trim()).filter(Boolean);
+    if (parts.length < 5) return null;
+    const station = parseStationValue(parts[0]);
+    const left = parseFloat(parts[1]);
+    const bottom = parseFloat(parts[2]);
+    const width = parseFloat(parts[3]);
+    const height = parseFloat(parts[4]);
+    if ([station, left, bottom, width, height].some((v) => v == null || !isFinite(v))) return null;
+    return { station, left, bottom, width, height };
+  }).filter(Boolean);
+}
+function primaryCenterline() {
+  const obs = allObservationLines();
+  if (obs.length) return obs[0];
+  for (const ov of overlays) {
+    if (ov.hidden) continue;
+    const lines = featureLines(ov);
+    if (lines.length) return lines[0];
+  }
+  return null;
+}
+function centerlineXY(line, proj) {
+  const pts = line.coords.map(([mx, my]) => mercToXY(proj, mx, my));
+  const segs = [];
+  let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    segs.push({ a, b, len, start: total, tx: dx / len, ty: dy / len });
+    total += len;
+  }
+  return { segs, total };
+}
+function stationPoint(line, proj, station, startStation, reverseStationing = false) {
+  const chain = centerlineXY(line, proj);
+  let dist = station - startStation;
+  if (reverseStationing) dist = chain.total - dist;
+  if (!chain.segs.length || dist < -1e-6 || dist > chain.total + 1e-6) return null;
+  const clamped = Math.max(0, Math.min(chain.total, dist));
+  const seg = chain.segs.find((s) => clamped <= s.start + s.len + 1e-6) || chain.segs[chain.segs.length - 1];
+  const f = Math.max(0, Math.min(1, (clamped - seg.start) / seg.len));
+  return {
+    x: seg.a[0] + (seg.b[0] - seg.a[0]) * f,
+    y: seg.a[1] + (seg.b[1] - seg.a[1]) * f,
+    tx: seg.tx,
+    ty: seg.ty,
+    centerlineLength: chain.total,
+  };
+}
+function eventRank(label) {
+  if (/2\s*[-_ ]?\s*y/i.test(label)) return 0;
+  if (/100/i.test(label) && !/2080/i.test(label)) return 1;
+  if (/500/i.test(label)) return 2;
+  if (/2080/i.test(label)) return 3;
+  return 10;
+}
+function crossEventLabel(name) {
+  const s = runLabel(name).replace(/^FHD[_\s-]*/i, "").replace(/_/g, " ").trim();
+  if (/2080/i.test(s) && /100/i.test(s)) return "2080 100-year";
+  if (/2\s*Y/i.test(s) || /\b2\b/i.test(s)) return "2-year";
+  if (/500/i.test(s)) return "500-year";
+  if (/100/i.test(s)) return "100-year";
+  return s || runLabel(name);
+}
+function crossEventStyle(label) {
+  if (/2-year/i.test(label)) return { color: "#2c7bc9", dash: [], width: 2.1 };
+  if (/100-year/i.test(label) && !/2080/i.test(label)) return { color: "#2fbf5f", dash: [], width: 2.1 };
+  if (/500-year/i.test(label)) return { color: "#d336ff", dash: [12, 8], width: 2.0 };
+  if (/2080/i.test(label)) return { color: "#f5a623", dash: [12, 8], width: 2.0 };
+  return { color: "#6b7280", dash: [], width: 1.8 };
+}
+function proposedCrossEvents() {
+  return allRunOptions("PR").map((opt) => {
+    const wseParam = findParam(opt.run, /Water_?Elev/i);
+    if (!wseParam) return null;
+    const label = crossEventLabel(opt.run.name);
+    return { ...opt, wseParam, label, ...crossEventStyle(label), rank: eventRank(label) };
+  }).filter(Boolean).sort((a, b) => a.rank - b.rank || a.idx - b.idx);
+}
+function buildCrossSectionRow(sta, line, prCond, events, culverts) {
+  const startStation = parseFloat($("xsStartStation").value) || 0;
+  const width = Math.max(5, parseFloat($("xsWidth").value) || 60);
+  const spacing = Math.max(0.5, parseFloat($("xsSpacing").value) || 1);
+  const center = stationPoint(line, prCond.proj, sta.station, startStation, $("xsReverseStationing").checked);
+  if (!center) throw new Error(`${sta.label} is outside the centerline station range.`);
+  let nx = -center.ty, ny = center.tx;
+  if ($("xsFlip").checked) { nx *= -1; ny *= -1; }
+  const steps = Math.max(2, Math.ceil(width / spacing));
+  const eventValues = events.map((ev) => ({ ev, values: scalarValues(ev, ev.wseParam) }));
+  const samples = [];
+  for (let i = 0; i <= steps; i++) {
+    const along = i / steps * width;
+    const off = along - width / 2;
+    const x = center.x + nx * off;
+    const y = center.y + ny * off;
+    const idx = nearestNodeXY(prCond.proj, x, y);
+    const wse = {};
+    for (const item of eventValues) wse[item.ev.label] = idx >= 0 ? item.values[idx] : null;
+    samples.push({
+      x: along,
+      ground: idx >= 0 ? prCond.proj.z[idx] : null,
+      wse,
+    });
+  }
+  const nearCulverts = culverts.filter((c) => Math.abs(c.station - sta.station) < 0.51);
+  return { station: sta.station, label: sta.label, width, samples, events, culverts: nearCulverts };
+}
+function generateCrossSections() {
+  const prCond = conditions.get("PR");
+  if (!prCond?.proj || !prCond?.datasets) return msg("Load Proposed geometry and datasets before generating cross sections.", "warn");
+  const line = primaryCenterline();
+  if (!line) return msg("Add a centerline shapefile or observation line before generating cross sections.", "warn");
+  const stations = stationListFromControls();
+  if (!stations.length) return msg("Enter cross-section stations, or paste an SMS Summary Table with station rows.", "warn");
+  const events = proposedCrossEvents();
+  if (!events.length) return msg("Proposed datasets need Water_Elev_ft runs for cross sections.", "warn");
+  const culverts = parseCrossSectionCulverts();
+  try {
+    crossRows = stations.map((sta) => buildCrossSectionRow(sta, line, prCond, events, culverts));
+    renderCrossSections();
+    switchView("crossSections");
+    msg(`Generated ${crossRows.length} proposed-condition cross section${crossRows.length === 1 ? "" : "s"}.`, "ok");
+  } catch (err) {
+    msg(err.message, "err");
+  }
+}
+function fillBetweenSeries(ctx, samples, xTo, yTo, topFn, bottomFn, fillStyle) {
+  let chunk = [];
+  const flush = () => {
+    if (chunk.length < 2) { chunk = []; return; }
+    ctx.beginPath();
+    chunk.forEach((p, i) => { i ? ctx.lineTo(xTo(p.x), yTo(p.top)) : ctx.moveTo(xTo(p.x), yTo(p.top)); });
+    for (let i = chunk.length - 1; i >= 0; i--) ctx.lineTo(xTo(chunk[i].x), yTo(chunk[i].bottom));
+    ctx.closePath();
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+    chunk = [];
+  };
+  for (const s of samples) {
+    const top = topFn(s), bottom = bottomFn(s);
+    if (VALID(top) && VALID(bottom) && top > bottom) chunk.push({ x: s.x, top, bottom });
+    else flush();
+  }
+  flush();
+}
+function drawSeries(ctx, samples, xTo, yTo, valueFn, style) {
+  ctx.save();
+  ctx.strokeStyle = style.color;
+  ctx.lineWidth = style.width || 2;
+  ctx.setLineDash(style.dash || []);
+  ctx.beginPath();
+  let open = false;
+  for (const s of samples) {
+    const v = valueFn(s);
+    if (!VALID(v)) { open = false; continue; }
+    const x = xTo(s.x), y = yTo(v);
+    if (!open) { ctx.moveTo(x, y); open = true; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+function renderCrossSectionChart(canvas, row) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const P = { l: 72, r: 32, t: 38, b: 70 };
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, W, H);
+  const vals = [];
+  row.samples.forEach((s) => {
+    vals.push(s.ground);
+    row.events.forEach((ev) => vals.push(s.wse[ev.label]));
+  });
+  row.culverts.forEach((c) => vals.push(c.bottom, c.bottom + c.height));
+  const valid = vals.filter(VALID);
+  const yb = niceBounds(Math.min(...valid), Math.max(...valid), 7);
+  const xTo = (x) => P.l + x / row.width * (W - P.l - P.r);
+  const yTo = (y) => H - P.b - (y - yb.min) / (yb.max - yb.min || 1) * (H - P.t - P.b);
+  ctx.strokeStyle = "#e1e5ea";
+  ctx.lineWidth = 1;
+  ctx.font = "16px Arial";
+  ctx.fillStyle = "#5f6672";
+  for (let y = yb.min; y <= yb.max + 1e-9; y += yb.step) {
+    const py = yTo(y);
+    ctx.beginPath(); ctx.moveTo(P.l, py); ctx.lineTo(W - P.r, py); ctx.stroke();
+    ctx.fillText(y.toFixed(Math.abs(y) >= 100 ? 0 : 1), 18, py + 5);
+  }
+  const xb = niceBounds(0, row.width, 6);
+  for (let x = xb.min; x <= row.width + 1e-9; x += xb.step) {
+    if (x < -1e-9) continue;
+    const px = xTo(x);
+    ctx.beginPath(); ctx.moveTo(px, P.t); ctx.lineTo(px, H - P.b); ctx.stroke();
+    ctx.fillText(String(Math.round(x)), px - 8, H - P.b + 28);
+  }
+  ctx.strokeStyle = "#222";
+  ctx.lineWidth = 1.2;
+  ctx.strokeRect(P.l, P.t, W - P.l - P.r, H - P.t - P.b);
+
+  ctx.fillStyle = "rgba(202, 176, 130, 0.20)";
+  ctx.beginPath();
+  row.samples.forEach((s, i) => { i ? ctx.lineTo(xTo(s.x), yTo(s.ground)) : ctx.moveTo(xTo(s.x), yTo(s.ground)); });
+  ctx.lineTo(xTo(row.width), H - P.b);
+  ctx.lineTo(xTo(0), H - P.b);
+  ctx.closePath();
+  ctx.fill();
+  const fillEvent = row.events.find((ev) => /2-year/i.test(ev.label)) || row.events[0];
+  if (fillEvent) fillBetweenSeries(ctx, row.samples, xTo, yTo, (s) => s.wse[fillEvent.label], (s) => s.ground, "rgba(96, 164, 224, 0.25)");
+
+  drawSeries(ctx, row.samples, xTo, yTo, (s) => s.ground, { color: "#7b5b35", width: 2.4, dash: [] });
+  row.events.forEach((ev) => drawSeries(ctx, row.samples, xTo, yTo, (s) => s.wse[ev.label], ev));
+
+  ctx.save();
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 2;
+  row.culverts.forEach((c) => {
+    ctx.strokeRect(xTo(c.left), yTo(c.bottom + c.height), xTo(c.left + c.width) - xTo(c.left), yTo(c.bottom) - yTo(c.bottom + c.height));
+  });
+  ctx.restore();
+
+  const groundSamples = row.samples.filter((s) => VALID(s.ground));
+  const thalweg = groundSamples.reduce((best, s) => !best || s.ground < best.ground ? s : best, null);
+  if (thalweg) {
+    const tx = xTo(thalweg.x), ty = yTo(thalweg.ground);
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#7b5b35";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(tx, ty, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.font = "16px Arial";
+    ctx.fillStyle = "#555";
+    ctx.fillText(`Thalweg ${thalweg.ground.toFixed(2)}`, tx + 8, ty + 18);
+  }
+
+  drawCrossSectionLegend(ctx, row, W, P.t + 8);
+  ctx.font = "18px Arial";
+  ctx.fillStyle = "#333";
+  ctx.textAlign = "center";
+  ctx.fillText("Distance (feet)", W / 2, H - 22);
+  ctx.save();
+  ctx.translate(24, H / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("Elevation (feet, NAVD88)", 0, 0);
+  ctx.restore();
+  ctx.textAlign = "left";
+  ctx.font = "16px Arial";
+  const note = "Cross Section is looking downstream";
+  const nw = ctx.measureText(note).width + 12;
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.strokeStyle = "#c8ced6";
+  ctx.fillRect(P.l + 8, H - P.b - 30, nw, 26);
+  ctx.strokeRect(P.l + 8, H - P.b - 30, nw, 26);
+  ctx.fillStyle = "#333";
+  ctx.fillText(note, P.l + 14, H - P.b - 11);
+}
+function drawCrossSectionLegend(ctx, row, W, y) {
+  const items = [["Proposed Ground", "#7b5b35", [], 2.4]].concat(row.events.map((ev) => [ev.label, ev.color, ev.dash, ev.width]));
+  if (row.culverts.length) items.push(["Culvert", "#111", [], 2]);
+  const x = W - 300, h = 27 * items.length + 14;
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.90)";
+  ctx.strokeStyle = "#c8ced6";
+  ctx.fillRect(x, y, 270, h);
+  ctx.strokeRect(x, y, 270, h);
+  ctx.font = "16px Arial";
+  items.forEach((it, i) => {
+    const yy = y + 21 + i * 27;
+    ctx.strokeStyle = it[1];
+    ctx.lineWidth = it[3] || 2;
+    ctx.setLineDash(it[2] || []);
+    ctx.beginPath(); ctx.moveTo(x + 14, yy); ctx.lineTo(x + 52, yy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#333";
+    ctx.fillText(it[0], x + 62, yy + 5);
+  });
+  ctx.restore();
+}
+function renderCrossSections() {
+  const host = $("crossSections");
+  host.innerHTML = "";
+  $("crossSectionsEmpty").hidden = crossRows.length > 0;
+  crossRows.forEach((r, i) => {
+    const card = document.createElement("div");
+    card.className = "chart-card";
+    card.innerHTML = `<div class="chart-head"><strong>Proposed Conditions, Cross Section at Station ${escapeHtml(r.label)}</strong><button type="button" class="ghost">Download PNG</button></div><canvas width="1300" height="772"></canvas>`;
+    const cv = card.querySelector("canvas");
+    renderCrossSectionChart(cv, r);
+    card.querySelector("button").addEventListener("click", () => downloadCanvas(cv, `FRA_Cross_Section_${safeName(r.label)}.png`));
+    host.appendChild(card);
+  });
+}
+
 function generateCharts() {
   const exSel = selectedRun("existingRun");
   const prSel = selectedRun("proposedRun");
@@ -1159,6 +1526,9 @@ function projectState() {
       showContours: $("showContours").checked, titleText: $("titleText").value,
       showTitle: $("showTitle").checked, showLegend: $("showLegend").checked, showNorth: $("showNorth").checked,
       showScale: $("showScale").checked, showOverlays: $("showOverlays").checked, showAnnos: $("showAnnos").checked,
+      xsStations: $("xsStations").value, xsStartStation: $("xsStartStation").value, xsWidth: $("xsWidth").value,
+      xsSpacing: $("xsSpacing").value, xsFlip: $("xsFlip").checked, xsReverseStationing: $("xsReverseStationing").checked,
+      xsCulverts: $("xsCulverts").value,
       rotDeg, zoom, panX, panY,
     },
     summaryPaste: $("summaryPaste").value,
@@ -1179,8 +1549,8 @@ async function loadProjectFile(file) {
     overlaySeq = data.overlaySeq || overlays.reduce((m, o) => Math.max(m, o.id || 0), 0);
     $("summaryPaste").value = data.summaryPaste || "";
     const c = data.controls || {};
-    for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "titleText"]) if (id in c) $(id).value = c[id];
-    for (const id of ["showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos"]) if (id in c) $(id).checked = !!c[id];
+    for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "titleText", "xsStations", "xsStartStation", "xsWidth", "xsSpacing", "xsCulverts"]) if (id in c) $(id).value = c[id];
+    for (const id of ["showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "xsFlip", "xsReverseStationing"]) if (id in c) $(id).checked = !!c[id];
     rotDeg = c.rotDeg || 0; zoom = c.zoom || 1; panX = c.panX || 0; panY = c.panY || 0; $("rot").value = rotDeg;
     renderOverlayList(); renderLineList(); renderAnnoList();
     if (scene) await renderMap();
@@ -1194,6 +1564,7 @@ wireDropzone("dropH5", "h5Files", ingestH5Files, /\.h5$/i);
 wireDropzone("dropOverlay", "overlayFiles", ingestOverlayFiles, /\.zip$/i);
 $("generateMap").addEventListener("click", generateMap);
 $("generateCharts").addEventListener("click", generateCharts);
+$("generateCrossSections").addEventListener("click", generateCrossSections);
 $("downloadMap").addEventListener("click", () => downloadCanvas($("mapCanvas"), `FRA_${safeName(scene?.type || "map")}.png`));
 $("drawLine").addEventListener("click", beginDrawingLine);
 $("applyStations").addEventListener("click", applyStationLabels);
