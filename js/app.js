@@ -1,5 +1,5 @@
 import * as h5wasm from "../vendor/h5wasm/hdf5_hl.js";
-import shp, { combine, parseDbf, parseShp } from "shpjs";
+import shp from "shpjs";
 import proj4 from "proj4";
 import { readGeometry, readDatasets, finalTimestep, finalVector, isGeometryFile, isDatasetsFile } from "./h5.js";
 import { toLonLat, lonLatToMerc } from "./geo.js";
@@ -289,7 +289,7 @@ function populateRunSelectors() {
 async function ingestOverlayFiles(files) {
   for (const file of files) {
     try {
-      const res = await readOverlayZip(file);
+      const { res, usedMeshCrs } = await readOverlayZip(file);
       for (const fc of (Array.isArray(res) ? res : [res])) {
         overlays.push({
           id: ++overlaySeq,
@@ -305,8 +305,9 @@ async function ingestOverlayFiles(files) {
           open: false,
         });
       }
+      if (usedMeshCrs) msg(`Read ${file.name} using the loaded mesh CRS because its shapefile projection is not supported directly.`, "warn");
     } catch (err) {
-      msg(`Could not read ${file.name}: ${err.message || "unsupported shapefile"}`, "err");
+      msg(`Could not read ${file.name}: ${overlayErrorText(err)}`, "err");
     }
   }
   renderOverlayList();
@@ -314,147 +315,75 @@ async function ingestOverlayFiles(files) {
   if (scene) await renderMap();
 }
 
+function overlayMeshWkt() {
+  for (const [, c] of usableConditions()) if (c.proj?.wkt) return c.proj.wkt;
+  return null;
+}
+
+const zipU16 = (a, i) => a[i] | (a[i + 1] << 8);
+const zipU32 = (a, i) => (a[i] | (a[i + 1] << 8) | (a[i + 2] << 16) | (a[i + 3] << 24)) >>> 0;
+function ignorePrjEntriesInZip(buf) {
+  const out = new Uint8Array(buf);
+  const dec = new TextDecoder();
+  let changed = false;
+  for (let i = 0; i < out.length - 4; i++) {
+    const sig = zipU32(out, i);
+    let lenAt = -1, nameAt = -1;
+    if (sig === 0x04034b50 && i + 30 <= out.length) { lenAt = i + 26; nameAt = i + 30; }
+    else if (sig === 0x02014b50 && i + 46 <= out.length) { lenAt = i + 28; nameAt = i + 46; }
+    if (lenAt < 0) continue;
+    const nameLen = zipU16(out, lenAt), nameEnd = nameAt + nameLen;
+    if (nameEnd > out.length) continue;
+    const name = dec.decode(out.slice(nameAt, nameEnd));
+    if (/\.prj$/i.test(name)) {
+      out[nameEnd - 1] = name.endsWith("PRJ") ? 88 : 120; // .prj -> .prx, same length
+      changed = true;
+    }
+  }
+  return { bytes: out, changed };
+}
+
+function reprojectRawOverlayWithMeshCrs(fc, wkt) {
+  const xy = [], refs = [];
+  const visit = (coords) => {
+    if (!Array.isArray(coords)) return;
+    if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+      refs.push(coords);
+      xy.push(coords[0], coords[1]);
+    } else {
+      for (const c of coords) visit(c);
+    }
+  };
+  for (const f of fc.features || []) if (f.geometry) visit(f.geometry.coordinates);
+  if (!refs.length) return fc;
+  const { lon, lat } = toLonLat(Float64Array.from(xy), wkt);
+  refs.forEach((coord, i) => { coord[0] = lon[i]; coord[1] = lat[i]; });
+  return fc;
+}
+
 async function readOverlayZip(file) {
   const buffer = await file.arrayBuffer();
   try {
-    const parsed = await shp(buffer);
-    const list = Array.isArray(parsed) ? parsed : [parsed];
-    if (list.every(geojsonLooksLonLat)) return parsed;
-  } catch {
-    // Fall through to the tolerant reader below so the user gets a useful error.
-  }
-  return readOverlayZipFallback(buffer);
-}
-
-async function readOverlayZipFallback(buffer) {
-  const entries = await unzipEntries(buffer);
-  const layers = new Map();
-  for (const [name, bytes] of entries) {
-    const m = /^(.+)\.(shp|dbf|prj|cpg)$/i.exec(name);
-    if (!m || /(^|\/)__MACOSX\//i.test(name)) continue;
-    const key = m[1].toLowerCase();
-    if (!layers.has(key)) layers.set(key, { base: m[1] });
-    layers.get(key)[m[2].toLowerCase()] = bytes;
-  }
-  const out = [];
-  for (const layer of layers.values()) {
-    if (!layer.shp) continue;
-    const geom = parseShp(layer.shp.buffer.slice(layer.shp.byteOffset, layer.shp.byteOffset + layer.shp.byteLength));
-    const props = layer.dbf ? parseDbf(layer.dbf.buffer.slice(layer.dbf.byteOffset, layer.dbf.byteOffset + layer.dbf.byteLength), layer.cpg ? decodeText(layer.cpg) : undefined) : [];
-    const fc = combine([geom, props]);
-    fc.fileName = layer.base.split(/[\\/]/).pop();
-    if (!geojsonLooksLonLat(fc)) {
-      if (!layer.prj) throw new Error(`${fc.fileName || "Layer"} uses projected coordinates but has no .prj file.`);
-      reprojectFeatureCollection(fc, decodeText(layer.prj));
+    return { res: await shp(buffer), usedMeshCrs: false };
+  } catch (primaryErr) {
+    const meshWkt = overlayMeshWkt();
+    const retry = ignorePrjEntriesInZip(buffer);
+    if (meshWkt && retry.changed) {
+      const res = await shp(retry.bytes);
+      const list = Array.isArray(res) ? res : [res];
+      for (const fc of list) reprojectRawOverlayWithMeshCrs(fc, meshWkt);
+      return { res: Array.isArray(res) ? list : list[0], usedMeshCrs: true, primaryErr };
     }
-    out.push(fc);
+    throw primaryErr;
   }
-  if (!out.length) throw new Error("No .shp layer found in the zip.");
-  return out.length === 1 ? out[0] : out;
 }
 
-async function unzipEntries(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
-  const eocd = findEndOfCentralDirectory(bytes);
-  if (eocd < 0) throw new Error("The zip file is missing its central directory.");
-  const count = view.getUint16(eocd + 10, true);
-  let ptr = view.getUint32(eocd + 16, true);
-  const entries = [];
-  for (let i = 0; i < count; i++) {
-    if (view.getUint32(ptr, true) !== 0x02014b50) throw new Error("The zip central directory is malformed.");
-    const method = view.getUint16(ptr + 10, true);
-    const compSize = view.getUint32(ptr + 20, true);
-    const nameLen = view.getUint16(ptr + 28, true);
-    const extraLen = view.getUint16(ptr + 30, true);
-    const commentLen = view.getUint16(ptr + 32, true);
-    const localOffset = view.getUint32(ptr + 42, true);
-    const name = decodeText(bytes.subarray(ptr + 46, ptr + 46 + nameLen)).replace(/\\/g, "/");
-    if (view.getUint32(localOffset, true) !== 0x04034b50) throw new Error(`Zip entry ${name} has a malformed local header.`);
-    const localNameLen = view.getUint16(localOffset + 26, true);
-    const localExtraLen = view.getUint16(localOffset + 28, true);
-    const dataStart = localOffset + 30 + localNameLen + localExtraLen;
-    const compressed = bytes.subarray(dataStart, dataStart + compSize);
-    const data = method === 0 ? compressed : method === 8 ? await inflateRaw(compressed) : null;
-    if (!data) throw new Error(`Zip entry ${name} uses unsupported compression method ${method}.`);
-    entries.push([name, data]);
-    ptr += 46 + nameLen + extraLen + commentLen;
+function overlayErrorText(err) {
+  const text = typeof err === "string" ? err : (err?.message || String(err ?? "Unknown error"));
+  if (/Affine Post Process|Could not get projection name|PROJCS\[|s is not a function/i.test(text)) {
+    return "unsupported shapefile projection. Load the matching Existing/Proposed mesh .h5 files first so the app can use the mesh CRS, or export the shapefile in WGS84.";
   }
-  return entries;
-}
-
-function findEndOfCentralDirectory(bytes) {
-  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66000); i--) {
-    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) return i;
-  }
-  return -1;
-}
-
-async function inflateRaw(bytes) {
-  if (!globalThis.DecompressionStream) throw new Error("This browser cannot decompress zipped shapefiles.");
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-function decodeText(bytes) {
-  return new TextDecoder().decode(bytes);
-}
-
-function geojsonLooksLonLat(fc) {
-  let checked = 0, ok = true;
-  visitFeatureCoords(fc, ([x, y]) => {
-    if (checked++ >= 100) return;
-    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 180 || Math.abs(y) > 90) ok = false;
-  });
-  return checked > 0 && ok;
-}
-
-function visitFeatureCoords(fc, cb) {
-  for (const f of fc?.features || []) visitCoords(f.geometry?.coordinates, cb);
-}
-
-function visitCoords(coords, cb) {
-  if (!Array.isArray(coords)) return;
-  if (typeof coords[0] === "number" && typeof coords[1] === "number") cb(coords);
-  else coords.forEach((c) => visitCoords(c, cb));
-}
-
-function reprojectFeatureCollection(fc, prjText) {
-  const tx = projectionToWgs84(prjText);
-  for (const f of fc.features || []) if (f.geometry) f.geometry.coordinates = mapCoords(f.geometry.coordinates, (pt) => tx.forward(pt));
-}
-
-function mapCoords(coords, cb) {
-  if (typeof coords?.[0] === "number" && typeof coords?.[1] === "number") return cb(coords);
-  return Array.isArray(coords) ? coords.map((c) => mapCoords(c, cb)) : coords;
-}
-
-function projectionToWgs84(prjText) {
-  try { return proj4(prjText, "WGS84"); } catch {}
-  const proj = lambertAffineWktToProj4(prjText);
-  if (proj) return proj4(proj, "WGS84");
-  throw new Error("The shapefile projection is not supported. Re-export it as WGS84 or the same SMS/model coordinate system.");
-}
-
-function lambertAffineWktToProj4(wkt) {
-  if (!/Lambert Conformal Conic/i.test(wkt)) return null;
-  const param = (name) => {
-    const m = new RegExp(`PARAMETER\\["${name}"\\s*,\\s*([-+0-9.Ee]+)`, "i").exec(wkt);
-    return m ? parseFloat(m[1]) : null;
-  };
-  const spheroid = /SPHEROID\["[^"]+"\s*,\s*([-+0-9.Ee]+)\s*,\s*([-+0-9.Ee]+)/i.exec(wkt);
-  const units = [...wkt.matchAll(/UNIT\["[^"]+"\s*,\s*([-+0-9.Ee]+)/gi)];
-  const unit = units.length ? parseFloat(units[units.length - 1][1]) : 1;
-  const lat1 = param("Standard_Parallel_1");
-  const lat2 = param("Standard_Parallel_2");
-  const lat0 = param("Latitude_Of_Origin");
-  const lon0 = param("Central_Meridian");
-  const x0 = param("False_Easting");
-  const y0 = param("False_Northing");
-  if (![lat1, lat2, lat0, lon0, x0, y0, unit].every(Number.isFinite) || !spheroid) return null;
-  const a = parseFloat(spheroid[1]);
-  const rf = parseFloat(spheroid[2]);
-  return `+proj=lcc +lat_1=${lat1} +lat_2=${lat2} +lat_0=${lat0} +lon_0=${lon0} +x_0=${x0 * unit} +y_0=${y0 * unit} +a=${a} +rf=${rf} +to_meter=${unit} +no_defs`;
+  return text.length > 220 ? `${text.slice(0, 220)}...` : text;
 }
 
 function renderOverlayList() {
