@@ -409,6 +409,33 @@ input[type="color"] {
 .anno-actions button, .bulk button { flex: 1; }
 .bulk input { flex: 1 1 180px; }
 
+.map-position-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.map-pos-card {
+  border: 1px solid #d8e1ec;
+  border-radius: 7px;
+  background: #f9fbfe;
+  padding: 8px;
+  display: grid;
+  gap: 7px;
+}
+.map-pos-head, .map-pos-nudges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.map-pos-head strong { flex: 1; }
+.map-pos-card select { padding: 5px 7px; }
+.map-pos-offset {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+
 #toastStack {
   position: fixed;
   left: 16px;

@@ -10,6 +10,7 @@ The first version focuses on the SMS-derived figures that are difficult to expor
 - Proposed-condition cross-section figures from a centerline and station list
 - Observation-line WSE comparison charts
 - Existing/proposed WSE summary tables
+- Anchor and nudge controls for built-in map elements such as legends, north arrow, scale bar, and wet/dry key
 
 Everything runs in the browser. Mesh/result files are read locally and are not uploaded to a server.
 

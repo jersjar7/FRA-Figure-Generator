@@ -7,7 +7,7 @@ import { fillMesh, strokeMesh } from "./contour.js";
 import { drawBasemap, ESRI_WORLD_IMAGERY } from "./tiles.js";
 import { drawOverlays, drawOverlayLabels, propKeys, describe, OVERLAY_PALETTE } from "./overlays.js";
 import { RAMPS, rampColor, makeColorFn, legendBands } from "./ramps.js";
-import { drawTitle, drawLegend, drawNorthArrow, drawScaleBar, drawAnnotations } from "./render.js";
+import { anchorBox, drawTitle, drawLegend, drawNorthArrow, drawScaleBar, drawAnnotations } from "./render.js";
 import { parseSummary, formatStation } from "./parse.js";
 
 const $ = (id) => document.getElementById(id);
@@ -31,6 +31,23 @@ let manualLineSeq = 0;
 let scene = null;
 let chartRows = [];
 let crossRows = [];
+const MAP_ELEMENT_CONFIG = [
+  { key: "title", label: "Title", anchor: "tc" },
+  { key: "diffLegend", label: "WSE diff legend", anchor: "br" },
+  { key: "topoLegend", label: "Topography legend", anchor: "tl" },
+  { key: "north", label: "North arrow", anchor: "tr" },
+  { key: "scale", label: "Scale bar", anchor: "bl" },
+  { key: "wetDry", label: "Wet/dry key", anchor: "mr" },
+];
+const ANCHORS = [
+  ["tl", "Top left"], ["tc", "Top center"], ["tr", "Top right"],
+  ["ml", "Middle left"], ["mc", "Center"], ["mr", "Middle right"],
+  ["bl", "Bottom left"], ["bc", "Bottom center"], ["br", "Bottom right"],
+];
+function defaultMapElementPositions() {
+  return Object.fromEntries(MAP_ELEMENT_CONFIG.map((c) => [c.key, { anchor: c.anchor, offX: 0, offY: 0 }]));
+}
+let mapElementPos = defaultMapElementPositions();
 let drawingLine = null;
 let placingAnno = null;
 let rotDeg = 0, zoom = 1, panX = 0, panY = 0;
@@ -639,6 +656,10 @@ function ftPerPixel(view) {
   const p = activeProj();
   return (p?.ftPerMerc || 3.28084) / view.scale;
 }
+function mapElementOptions(key, extra = {}) {
+  const defaults = defaultMapElementPositions()[key] || { anchor: "br", offX: 0, offY: 0 };
+  return { ...defaults, ...(mapElementPos[key] || {}), ...extra };
+}
 
 async function composeMap(ctx, fig, frameObj) {
   const view = makeView(commonBbox(), frameObj);
@@ -679,14 +700,14 @@ async function composeMap(ctx, fig, frameObj) {
   if ($("showAnnos").checked) drawAnnotations(ctx, view, annotations);
 
   const mapTitle = resolveTitle(fig);
-  if ($("showTitle").checked) drawTitle(ctx, mapTitle, { frameW: frameObj.w, frameH: frameObj.h, anchor: "tc", fontSize: 26 });
+  if ($("showTitle").checked) drawTitle(ctx, mapTitle, mapElementOptions("title", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 26 }));
   if ($("showLegend").checked) {
-    if (fig.type === "diff") drawLegend(ctx, diffLegend(fig.maxAbs), { frameW: frameObj.w, frameH: frameObj.h, anchor: "br", fontSize: 19 });
-    else drawLegend(ctx, legendBands("Topography", { min: fig.groundBounds.min, max: fig.groundBounds.max, interval: fig.groundBounds.step, ramp: "topography" }), { frameW: frameObj.w, frameH: frameObj.h, anchor: "tl", fontSize: 18 });
+    if (fig.type === "diff") drawLegend(ctx, diffLegend(fig.maxAbs), mapElementOptions("diffLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 19 }));
+    else drawLegend(ctx, legendBands("Topography", { min: fig.groundBounds.min, max: fig.groundBounds.max, interval: fig.groundBounds.step, ramp: "topography" }), mapElementOptions("topoLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 18 }));
   }
-  if ($("showNorth").checked) drawNorthArrow(ctx, { frameW: frameObj.w, frameH: frameObj.h, anchor: "tr", radius: 46, rotRad: view.rotRad });
-  if ($("showScale").checked) drawScaleBar(ctx, { frameW: frameObj.w, frameH: frameObj.h, anchor: "bl", ftPerPixel: ftPerPixel(view), sizeScale: 1.5, segments: 4 });
-  if (fig.type === "diff" && $("showWetDry").checked) drawWetDryKey(ctx, frameObj);
+  if ($("showNorth").checked) drawNorthArrow(ctx, mapElementOptions("north", { frameW: frameObj.w, frameH: frameObj.h, radius: 46, rotRad: view.rotRad }));
+  if ($("showScale").checked) drawScaleBar(ctx, mapElementOptions("scale", { frameW: frameObj.w, frameH: frameObj.h, ftPerPixel: ftPerPixel(view), sizeScale: 1.5, segments: 4 }));
+  if (fig.type === "diff" && $("showWetDry").checked) drawWetDryKey(ctx, frameObj, mapElementOptions("wetDry", { frameW: frameObj.w, frameH: frameObj.h }));
 }
 function fillWetDepth(ctx, lx, ly, tris, depth) {
   ctx.save();
@@ -702,8 +723,10 @@ function fillWetDepth(ctx, lx, ly, tris, depth) {
   }
   ctx.restore();
 }
-function drawWetDryKey(ctx, frameObj) {
-  const x = frameObj.w - 292, y = frameObj.h - 278, w = 250, h = 92;
+function drawWetDryKey(ctx, frameObj, o = {}) {
+  const { anchor = "mr", offX = 0, offY = 0 } = o;
+  const w = 250, h = 92;
+  const [x, y] = anchorBox(anchor, w, h, frameObj.w, frameObj.h, 18, offX, offY);
   ctx.save();
   ctx.fillStyle = "rgba(255,255,255,0.85)";
   ctx.strokeStyle = "rgba(0,0,0,0.25)";
@@ -1515,6 +1538,53 @@ function renderAnnoList() {
     host.appendChild(li);
   });
 }
+function renderMapElementControls() {
+  const host = $("mapElementPositions");
+  if (!host) return;
+  host.innerHTML = "";
+  const defaults = defaultMapElementPositions();
+  MAP_ELEMENT_CONFIG.forEach((cfg) => {
+    const pos = { ...defaults[cfg.key], ...(mapElementPos[cfg.key] || {}) };
+    const card = document.createElement("div");
+    card.className = "map-pos-card";
+    card.innerHTML = `
+      <div class="map-pos-head">
+        <strong>${escapeHtml(cfg.label)}</strong>
+        <button class="mini map-pos-reset" type="button">Reset</button>
+      </div>
+      <label>Anchor
+        <select class="map-pos-anchor">
+          ${ANCHORS.map(([value, label]) => `<option value="${value}"${value === pos.anchor ? " selected" : ""}>${label}</option>`).join("")}
+        </select>
+      </label>
+      <div class="map-pos-nudges">
+        <button class="mini map-pos-nudge" type="button" data-dx="-20" data-dy="0">Left</button>
+        <button class="mini map-pos-nudge" type="button" data-dx="20" data-dy="0">Right</button>
+        <button class="mini map-pos-nudge" type="button" data-dx="0" data-dy="-20">Up</button>
+        <button class="mini map-pos-nudge" type="button" data-dx="0" data-dy="20">Down</button>
+        <span class="map-pos-offset">x ${Math.round(pos.offX || 0)}, y ${Math.round(pos.offY || 0)}</span>
+      </div>`;
+    const apply = async () => { renderMapElementControls(); if (scene) await renderMap(); };
+    card.querySelector(".map-pos-anchor").addEventListener("change", async (e) => {
+      mapElementPos[cfg.key] = { ...pos, anchor: e.target.value };
+      await apply();
+    });
+    card.querySelector(".map-pos-reset").addEventListener("click", async () => {
+      mapElementPos[cfg.key] = { ...defaults[cfg.key] };
+      await apply();
+    });
+    card.querySelectorAll(".map-pos-nudge").forEach((btn) => btn.addEventListener("click", async () => {
+      const cur = { ...defaults[cfg.key], ...(mapElementPos[cfg.key] || {}) };
+      mapElementPos[cfg.key] = {
+        ...cur,
+        offX: (cur.offX || 0) + parseFloat(btn.dataset.dx || "0"),
+        offY: (cur.offY || 0) + parseFloat(btn.dataset.dy || "0"),
+      };
+      await apply();
+    }));
+    host.appendChild(card);
+  });
+}
 
 function projectState() {
   return {
@@ -1529,6 +1599,7 @@ function projectState() {
       xsStations: $("xsStations").value, xsStartStation: $("xsStartStation").value, xsWidth: $("xsWidth").value,
       xsSpacing: $("xsSpacing").value, xsFlip: $("xsFlip").checked, xsReverseStationing: $("xsReverseStationing").checked,
       xsCulverts: $("xsCulverts").value,
+      mapElementPos,
       rotDeg, zoom, panX, panY,
     },
     summaryPaste: $("summaryPaste").value,
@@ -1551,8 +1622,9 @@ async function loadProjectFile(file) {
     const c = data.controls || {};
     for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "titleText", "xsStations", "xsStartStation", "xsWidth", "xsSpacing", "xsCulverts"]) if (id in c) $(id).value = c[id];
     for (const id of ["showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "xsFlip", "xsReverseStationing"]) if (id in c) $(id).checked = !!c[id];
+    mapElementPos = { ...defaultMapElementPositions(), ...(c.mapElementPos || {}) };
     rotDeg = c.rotDeg || 0; zoom = c.zoom || 1; panX = c.panX || 0; panY = c.panY || 0; $("rot").value = rotDeg;
-    renderOverlayList(); renderLineList(); renderAnnoList();
+    renderOverlayList(); renderLineList(); renderAnnoList(); renderMapElementControls();
     if (scene) await renderMap();
     msg("Project loaded. Re-drop H5 files if needed to rebuild figures.", "ok");
   } catch (err) {
@@ -1587,6 +1659,11 @@ $("addLabel").addEventListener("click", () => addAnnotation("label"));
 $("addArrow").addEventListener("click", () => addAnnotation("arrow"));
 $("addBulkLabels").addEventListener("click", () => addBulkLabels($("bulkLabels").value));
 $("bulkLabels").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addBulkLabels($("bulkLabels").value); } });
+$("resetMapElements").addEventListener("click", () => {
+  mapElementPos = defaultMapElementPositions();
+  renderMapElementControls();
+  if (scene) renderMap();
+});
 
 for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "titleText"]) {
   $(id).addEventListener("input", () => scene && renderMap());
@@ -1613,3 +1690,4 @@ refreshH5Status();
 renderOverlayList();
 renderLineList();
 renderAnnoList();
+renderMapElementControls();
