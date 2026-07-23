@@ -290,6 +290,30 @@ textarea { resize: vertical; min-height: 70px; }
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
+.legend-scale-panel {
+  border: 1px solid #d8e1ec;
+  border-radius: 7px;
+  background: #f9fbfe;
+  padding: 8px;
+}
+.legend-scale-panel > summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #23324b;
+  font-size: 0.9rem;
+}
+.legend-scale-block {
+  display: grid;
+  gap: 8px;
+  padding: 9px 0;
+  border-top: 1px solid #e3ebf4;
+}
+.legend-scale-block:first-of-type { border-top: 0; }
+.legend-scale-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
 
 .dropzone {
   min-height: 94px;

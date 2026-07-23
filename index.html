@@ -196,6 +196,50 @@
             <label class="chk"><input id="showTitle" type="checkbox" checked /> Title</label>
             <input id="titleText" type="text" value="{type} - {existing} vs {proposed}" />
             <label class="chk"><input id="showLegend" type="checkbox" checked /> Legend</label>
+            <div class="block-hd">Legend appearance</div>
+            <div class="legend-scale-grid">
+              <label class="inline">Font size <input id="legendFont" type="number" value="18" min="8" max="42" step="1" /></label>
+            </div>
+            <details class="legend-scale-panel">
+              <summary>Legend scales</summary>
+              <div class="legend-scale-block">
+                <div class="block-hd">WSE difference map</div>
+                <div class="row2">
+                  <label class="inline">Bound +/- <input id="diffLegendAbs" type="number" step="any" min="0" placeholder="auto" /></label>
+                  <label class="inline">Interval <input id="diffLegendStep" type="number" step="any" min="0" placeholder="auto" /></label>
+                </div>
+              </div>
+              <div class="legend-scale-block">
+                <div class="block-hd">Topography legend</div>
+                <div class="row2">
+                  <label class="inline">Min <input id="topoLegendMin" type="number" step="any" placeholder="auto" /></label>
+                  <label class="inline">Max <input id="topoLegendMax" type="number" step="any" placeholder="auto" /></label>
+                </div>
+                <div class="row2">
+                  <label class="inline">Interval <input id="topoLegendStep" type="number" step="any" min="0" placeholder="auto" /></label>
+                  <label>Ramp <select id="topoLegendRamp"></select></label>
+                </div>
+              </div>
+              <div class="legend-scale-block">
+                <div class="block-hd">Water-surface legend</div>
+                <div class="row2">
+                  <label class="inline">Min <input id="wseLegendMin" type="number" step="any" placeholder="auto" /></label>
+                  <label class="inline">Max <input id="wseLegendMax" type="number" step="any" placeholder="auto" /></label>
+                </div>
+                <div class="row2">
+                  <label class="inline">Interval <input id="wseLegendStep" type="number" step="any" min="0" placeholder="auto" /></label>
+                  <label>Ramp <select id="wseLegendRamp"></select></label>
+                </div>
+              </div>
+              <div class="legend-scale-block">
+                <div class="block-hd">Wet/dry key</div>
+                <div class="row2">
+                  <label class="inline">Newly wet <input id="wetDryWetColor" type="color" value="#28c985" /></label>
+                  <label class="inline">Newly dry <input id="wetDryDryColor" type="color" value="#ee7e6f" /></label>
+                </div>
+              </div>
+              <button id="resetLegendScales" type="button" class="ghost">Reset legend scales</button>
+            </details>
             <label class="chk"><input id="showNorth" type="checkbox" checked /> North arrow</label>
             <label class="chk"><input id="showScale" type="checkbox" checked /> Scale bar</label>
             <label class="chk"><input id="showOverlays" type="checkbox" checked /> Overlays</label>
@@ -224,6 +268,6 @@
   </div>
 
   <div id="toastStack" aria-live="polite" aria-atomic="false"></div>
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/app.js?v=20260723-legend-controls"></script>
 </body>
 </html>

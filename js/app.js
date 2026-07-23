@@ -6,7 +6,7 @@ import { toLonLat, lonLatToMerc } from "./geo.js";
 import { fillMesh, strokeMesh } from "./contour.js";
 import { drawBasemap, ESRI_WORLD_IMAGERY } from "./tiles.js";
 import { drawOverlays, drawOverlayLabels, propKeys, describe, OVERLAY_PALETTE } from "./overlays.js";
-import { RAMPS, rampColor, makeColorFn, legendBands } from "./ramps.js";
+import { rampColor, makeColorFn, legendBands, RAMP_OPTIONS } from "./ramps.js";
 import { anchorBox, drawTitle, drawLegend, drawNorthArrow, drawScaleBar, drawAnnotations } from "./render.js";
 import { parseSummary, formatStation } from "./parse.js";
 
@@ -798,8 +798,11 @@ function diffColor(maxAbs) {
     return `rgb(${rampColor(stops, t).join(",")})`;
   };
 }
-function diffLegend(maxAbs) {
-  const n = 8, bands = [];
+function diffLegend(maxAbs, interval = null) {
+  const n = interval && interval > 0
+    ? Math.max(1, Math.min(80, Math.round((2 * maxAbs) / interval)))
+    : 8;
+  const bands = [];
   const fn = diffColor(maxAbs);
   const step = (2 * maxAbs) / n;
   for (let i = 0; i < n; i++) {
@@ -810,11 +813,12 @@ function diffLegend(maxAbs) {
 }
 function fillWetDry(ctx, lx, ly, tris, wetDry) {
   ctx.save();
+  const colors = wetDryColors(0.5);
   for (let t = 0; t < tris.length; t += 3) {
     const a = tris[t], b = tris[t + 1], c = tris[t + 2];
     const s = wetDry[a] + wetDry[b] + wetDry[c];
     if (s === 0) continue;
-    ctx.fillStyle = s > 0 ? "rgba(40, 201, 133, 0.50)" : "rgba(238, 126, 111, 0.50)";
+    ctx.fillStyle = s > 0 ? colors.wet : colors.dry;
     ctx.beginPath();
     ctx.moveTo(lx[a], ly[a]); ctx.lineTo(lx[b], ly[b]); ctx.lineTo(lx[c], ly[c]);
     ctx.closePath(); ctx.fill();
@@ -867,6 +871,58 @@ function mapElementOptions(key, extra = {}) {
   const defaults = defaultMapElementPositions()[key] || { anchor: "br", offX: 0, offY: 0 };
   return { ...defaults, ...(mapElementPos[key] || {}), ...extra };
 }
+function optionalNum(id) {
+  const el = $(id);
+  if (!el) return null;
+  const v = parseFloat(el.value);
+  return Number.isFinite(v) ? v : null;
+}
+function colorVal(id, fallback) {
+  return $(id)?.value || fallback;
+}
+function hexToRgba(hex, alpha) {
+  const clean = String(hex || "").trim().replace("#", "");
+  const short = /^[0-9a-f]{3}$/i.test(clean);
+  const full = /^[0-9a-f]{6}$/i.test(clean);
+  if (!short && !full) return hex;
+  const expanded = short ? clean.split("").map((c) => c + c).join("") : clean;
+  const r = parseInt(expanded.slice(0, 2), 16);
+  const g = parseInt(expanded.slice(2, 4), 16);
+  const b = parseInt(expanded.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+function wetDryColors(alpha) {
+  return {
+    wet: hexToRgba(colorVal("wetDryWetColor", "#28c985"), alpha),
+    dry: hexToRgba(colorVal("wetDryDryColor", "#ee7e6f"), alpha),
+  };
+}
+function legendFont(defaultSize) {
+  const v = optionalNum("legendFont");
+  return v && v > 0 ? v : defaultSize;
+}
+function scalarLegendControls(prefix, fallback, defaultRamp) {
+  const minInput = optionalNum(`${prefix}Min`);
+  const maxInput = optionalNum(`${prefix}Max`);
+  const stepInput = optionalNum(`${prefix}Step`);
+  const ramp = $(`${prefix}Ramp`)?.value || defaultRamp;
+  const stepDefault = fallback.step || Math.max((fallback.max - fallback.min) / 8, 1);
+  let min = minInput ?? fallback.min;
+  let max = maxInput ?? fallback.max;
+  let step = stepInput && stepInput > 0 ? stepInput : stepDefault;
+  if (!Number.isFinite(min)) min = 0;
+  if (!Number.isFinite(max) || max <= min) max = min + step;
+  if ((max - min) / step > 160) step = (max - min) / 160;
+  return { min, max, step, ramp };
+}
+function diffLegendControls(defaultMaxAbs) {
+  const bound = optionalNum("diffLegendAbs");
+  const step = optionalNum("diffLegendStep");
+  return {
+    maxAbs: Math.max(0.01, bound && bound > 0 ? bound : defaultMaxAbs),
+    step: step && step > 0 ? step : null,
+  };
+}
 function contourColor() {
   return $("contourColor")?.value || "#d92727";
 }
@@ -893,9 +949,10 @@ async function composeMap(ctx, fig, frameObj) {
   ctx.rotate(view.rotRad);
   const p = fig.proj;
   const { lx, ly } = localCoordsFor(p, view);
+  const diffScale = fig.type === "diff" ? diffLegendControls(fig.maxAbs) : null;
 
   if (fig.type === "diff") {
-    fillMesh(ctx, lx, ly, p.tris, fig.diff, diffColor(fig.maxAbs));
+    fillMesh(ctx, lx, ly, p.tris, fig.diff, diffColor(diffScale.maxAbs));
     if ($("showWetDry").checked) {
       fillWetDry(ctx, lx, ly, p.tris, fig.wetDry);
       if (fig.prProj && fig.prWetDry) {
@@ -908,11 +965,12 @@ async function composeMap(ctx, fig, frameObj) {
       drawContours(ctx, prLocal.lx, prLocal.ly, fig.prProj.tris, fig.prWseWet, parseFloat($("contourInterval").value), contourColor(), 1.5);
     }
   } else {
-    const nb = fig.groundBounds;
-    fillMesh(ctx, lx, ly, p.tris, p.z, makeColorFn("Topography", { min: nb.min, max: nb.max, interval: nb.step, ramp: "topography" }));
+    const topoScale = scalarLegendControls("topoLegend", fig.groundBounds, "topography");
+    const wseScale = scalarLegendControls("wseLegend", fig.wseBounds, "waterSurface");
+    fillMesh(ctx, lx, ly, p.tris, p.z, makeColorFn("Topography", { min: topoScale.min, max: topoScale.max, interval: topoScale.step, ramp: topoScale.ramp }));
     ctx.save();
     ctx.globalAlpha = 0.9;
-    fillMesh(ctx, lx, ly, p.tris, fig.wseWet, makeColorFn("Water_Elev_ft", { min: fig.wseBounds.min, max: fig.wseBounds.max, interval: fig.wseBounds.step, ramp: "waterSurface" }));
+    fillMesh(ctx, lx, ly, p.tris, fig.wseWet, makeColorFn("Water_Elev_ft", { min: wseScale.min, max: wseScale.max, interval: wseScale.step, ramp: wseScale.ramp }));
     ctx.restore();
     if ($("showContours").checked) drawContours(ctx, lx, ly, p.tris, fig.wseWet, parseFloat($("contourInterval").value), contourColor(), 1.2);
     strokeMesh(ctx, lx, ly, p.tris, { color: "rgba(30,30,30,0.18)", width: 0.35 });
@@ -928,15 +986,17 @@ async function composeMap(ctx, fig, frameObj) {
   const mapTitle = resolveTitle(fig);
   if ($("showTitle").checked) drawTitle(ctx, mapTitle, mapElementOptions("title", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 26 }));
   if ($("showLegend").checked) {
-    if (fig.type === "diff") drawLegend(ctx, diffLegend(fig.maxAbs), mapElementOptions("diffLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 19 }));
+    if (fig.type === "diff") drawLegend(ctx, diffLegend(diffScale.maxAbs, diffScale.step), mapElementOptions("diffLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: legendFont(19) }));
     else {
-      drawLegend(ctx, legendBands("Topography", { min: fig.groundBounds.min, max: fig.groundBounds.max, interval: fig.groundBounds.step, ramp: "topography" }), mapElementOptions("topoLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 18 }));
-      drawLegend(ctx, legendBands("Water_Elev_ft", { min: fig.wseBounds.min, max: fig.wseBounds.max, interval: fig.wseBounds.step, ramp: "waterSurface" }), mapElementOptions("wseLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: 18 }));
+      const topoScale = scalarLegendControls("topoLegend", fig.groundBounds, "topography");
+      const wseScale = scalarLegendControls("wseLegend", fig.wseBounds, "waterSurface");
+      drawLegend(ctx, legendBands("Topography", { min: topoScale.min, max: topoScale.max, interval: topoScale.step, ramp: topoScale.ramp }), mapElementOptions("topoLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: legendFont(18) }));
+      drawLegend(ctx, legendBands("Water_Elev_ft", { min: wseScale.min, max: wseScale.max, interval: wseScale.step, ramp: wseScale.ramp }), mapElementOptions("wseLegend", { frameW: frameObj.w, frameH: frameObj.h, fontSize: legendFont(18) }));
     }
   }
   if ($("showNorth").checked) drawNorthArrow(ctx, mapElementOptions("north", { frameW: frameObj.w, frameH: frameObj.h, radius: 46, rotRad: view.rotRad }));
   if ($("showScale").checked) drawScaleBar(ctx, mapElementOptions("scale", { frameW: frameObj.w, frameH: frameObj.h, ftPerPixel: ftPerPixel(view), sizeScale: 1.5, segments: 4 }));
-  if (fig.type === "diff" && $("showWetDry").checked) drawWetDryKey(ctx, frameObj, mapElementOptions("wetDry", { frameW: frameObj.w, frameH: frameObj.h }));
+  if (fig.type === "diff" && $("showWetDry").checked) drawWetDryKey(ctx, frameObj, mapElementOptions("wetDry", { frameW: frameObj.w, frameH: frameObj.h, fontSize: legendFont(18) }));
 }
 function fillWetDepth(ctx, lx, ly, tris, depth) {
   ctx.save();
@@ -953,25 +1013,38 @@ function fillWetDepth(ctx, lx, ly, tris, depth) {
   ctx.restore();
 }
 function drawWetDryKey(ctx, frameObj, o = {}) {
-  const { anchor = "mr", offX = 0, offY = 0 } = o;
-  const w = 250, h = 92;
-  const [x, y] = anchorBox(anchor, w, h, frameObj.w, frameObj.h, 18, offX, offY);
+  const { anchor = "mr", offX = 0, offY = 0, fontSize = 18 } = o;
+  const colors = wetDryColors(0.85);
+  const titleSize = Math.max(10, fontSize);
+  const labelSize = Math.max(9, fontSize - 2);
+  const pad = Math.max(10, Math.round(fontSize * 0.75));
+  const sw = Math.round(labelSize * 1.6);
   ctx.save();
+  ctx.font = `bold ${titleSize}px Arial`;
+  const titleW = ctx.measureText("Wet/Dry Change").width;
+  ctx.font = `${labelSize}px Arial`;
+  const labelW = Math.max(ctx.measureText("Newly inundated").width, ctx.measureText("Newly dry").width);
+  const rowH = Math.max(labelSize + 8, 20);
+  const w = Math.ceil(Math.max(titleW, sw + 8 + labelW) + pad * 2);
+  const h = Math.ceil(pad * 2 + titleSize + 8 + rowH * 2);
+  const [x, y] = anchorBox(anchor, w, h, frameObj.w, frameObj.h, 18, offX, offY);
   ctx.fillStyle = "rgba(255,255,255,0.85)";
   ctx.strokeStyle = "rgba(0,0,0,0.25)";
   ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
-  ctx.font = "bold 18px Arial";
+  ctx.font = `bold ${titleSize}px Arial`;
   ctx.fillStyle = "#111";
-  ctx.fillText("Wet/Dry Change", x + 14, y + 24);
-  ctx.fillStyle = "rgba(40, 201, 133, 0.85)";
-  ctx.fillRect(x + 16, y + 42, 26, 14);
+  ctx.fillText("Wet/Dry Change", x + pad, y + pad + titleSize);
+  ctx.fillStyle = colors.wet;
+  const row1Y = y + pad + titleSize + 14;
+  const row2Y = row1Y + rowH;
+  ctx.fillRect(x + pad, row1Y, sw, Math.max(10, labelSize - 2));
   ctx.fillStyle = "#111";
-  ctx.font = "16px Arial";
-  ctx.fillText("Newly inundated", x + 50, y + 54);
-  ctx.fillStyle = "rgba(238, 126, 111, 0.85)";
-  ctx.fillRect(x + 16, y + 66, 26, 14);
+  ctx.font = `${labelSize}px Arial`;
+  ctx.fillText("Newly inundated", x + pad + sw + 8, row1Y + labelSize - 1);
+  ctx.fillStyle = colors.dry;
+  ctx.fillRect(x + pad, row2Y, sw, Math.max(10, labelSize - 2));
   ctx.fillStyle = "#111";
-  ctx.fillText("Newly dry", x + 50, y + 78);
+  ctx.fillText("Newly dry", x + pad + sw + 8, row2Y + labelSize - 1);
   ctx.restore();
 }
 function drawObservationLines(ctx, view, rotated) {
@@ -1827,6 +1900,35 @@ function renderMapElementControls() {
   });
 }
 
+const LEGEND_VALUE_IDS = [
+  "legendFont",
+  "diffLegendAbs", "diffLegendStep",
+  "topoLegendMin", "topoLegendMax", "topoLegendStep", "topoLegendRamp",
+  "wseLegendMin", "wseLegendMax", "wseLegendStep", "wseLegendRamp",
+  "wetDryWetColor", "wetDryDryColor",
+];
+function initLegendRampSelects() {
+  for (const [id, def] of [["topoLegendRamp", "topography"], ["wseLegendRamp", "waterSurface"]]) {
+    const el = $(id);
+    if (!el) continue;
+    el.innerHTML = RAMP_OPTIONS.map(([key, label]) => `<option value="${key}">${escapeHtml(label)}</option>`).join("");
+    el.value = def;
+  }
+}
+function resetLegendScales() {
+  for (const id of LEGEND_VALUE_IDS) {
+    const el = $(id);
+    if (!el) continue;
+    if (id === "legendFont") el.value = "18";
+    else if (id === "topoLegendRamp") el.value = "topography";
+    else if (id === "wseLegendRamp") el.value = "waterSurface";
+    else if (id === "wetDryWetColor") el.value = "#28c985";
+    else if (id === "wetDryDryColor") el.value = "#ee7e6f";
+    else el.value = "";
+  }
+  if (scene) renderMap();
+}
+
 function projectState() {
   return {
     version: 1,
@@ -1840,6 +1942,10 @@ function projectState() {
       xsStations: $("xsStations").value, xsStartStation: $("xsStartStation").value, xsWidth: $("xsWidth").value,
       xsSpacing: $("xsSpacing").value, xsFlip: $("xsFlip").checked, xsReverseStationing: $("xsReverseStationing").checked,
       xsCulverts: $("xsCulverts").value,
+      legendFont: $("legendFont").value, diffLegendAbs: $("diffLegendAbs").value, diffLegendStep: $("diffLegendStep").value,
+      topoLegendMin: $("topoLegendMin").value, topoLegendMax: $("topoLegendMax").value, topoLegendStep: $("topoLegendStep").value, topoLegendRamp: $("topoLegendRamp").value,
+      wseLegendMin: $("wseLegendMin").value, wseLegendMax: $("wseLegendMax").value, wseLegendStep: $("wseLegendStep").value, wseLegendRamp: $("wseLegendRamp").value,
+      wetDryWetColor: $("wetDryWetColor").value, wetDryDryColor: $("wetDryDryColor").value,
       mapElementPos,
       rotDeg, zoom, panX, panY,
     },
@@ -1861,7 +1967,7 @@ async function loadProjectFile(file) {
     overlaySeq = data.overlaySeq || overlays.reduce((m, o) => Math.max(m, o.id || 0), 0);
     $("summaryPaste").value = data.summaryPaste || "";
     const c = data.controls || {};
-    for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "contourColor", "titleText", "xsStations", "xsStartStation", "xsWidth", "xsSpacing", "xsCulverts"]) if (id in c) $(id).value = c[id];
+    for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "contourColor", "titleText", "xsStations", "xsStartStation", "xsWidth", "xsSpacing", "xsCulverts", ...LEGEND_VALUE_IDS]) if (id in c) $(id).value = c[id];
     for (const id of ["showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "xsFlip", "xsReverseStationing"]) if (id in c) $(id).checked = !!c[id];
     mapElementPos = { ...defaultMapElementPositions(), ...(c.mapElementPos || {}) };
     rotDeg = c.rotDeg || 0; zoom = c.zoom || 1; panX = c.panX || 0; panY = c.panY || 0; $("rot").value = rotDeg;
@@ -1873,6 +1979,7 @@ async function loadProjectFile(file) {
   }
 }
 
+initLegendRampSelects();
 wireDropzone("dropH5", "h5Files", ingestH5Files, /\.h5$/i);
 wireDropzone("dropOverlay", "overlayFiles", ingestOverlayFiles, /\.zip$/i);
 $("generateMap").addEventListener("click", generateMap);
@@ -1905,8 +2012,9 @@ $("resetMapElements").addEventListener("click", () => {
   renderMapElementControls();
   if (scene) renderMap();
 });
+$("resetLegendScales").addEventListener("click", resetLegendScales);
 
-for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "contourColor", "showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "titleText"]) {
+for (const id of ["orientation", "figureType", "dryDepth", "contourInterval", "contourColor", "showWetDry", "showContours", "showTitle", "showLegend", "showNorth", "showScale", "showOverlays", "showAnnos", "titleText", ...LEGEND_VALUE_IDS]) {
   $(id).addEventListener("input", () => scene && renderMap());
   $(id).addEventListener("change", () => scene && renderMap());
 }
